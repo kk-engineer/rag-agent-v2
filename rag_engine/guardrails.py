@@ -19,6 +19,7 @@ from rag_engine.prompts import (
     SELF_CORRECTION_REWRITE_PROMPT
 )
 from rag_engine.llm import LiteLLMClient
+from rag_engine.metrics import LLMMetricsCollector
 
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,8 @@ class GuardrailsManager:
         self,
         answer: str,
         contexts: List[Dict[str, Any]],
-        model: str = "local-llm"
+        model: str = "local-llm",
+        metrics_collector: Optional[Any] = None
     ) -> Dict[str, Any]:
 
         formatted_context = ""
@@ -157,13 +159,15 @@ class GuardrailsManager:
 
         prompt = FAITHFULNESS_CHECK_PROMPT.format(context=formatted_context, answer=answer)
         messages = [{"role": "user", "content": prompt}]
-        
+
         try:
 
             response = await self.llm_client.acompletion(
                 messages=messages,
                 model=model,
-                temperature=0.0
+                temperature=0.0,
+                metrics_collector=metrics_collector,
+                metrics_purpose="Faithfulness check"
             )
             eval_text = response.choices[0].message.content
             return extract_json(eval_text)
@@ -191,6 +195,8 @@ class GuardrailsManager:
         gen_temp = self.config["generation"].get("temperature", 0.0)
         gen_tokens = self.config["generation"].get("max_tokens", 512)
 
+        llm_metrics = LLMMetricsCollector()
+
         total_gen_start = time.time()
         logger.info(f"Generating faithful answer for query: '{query}'")
 
@@ -207,7 +213,9 @@ class GuardrailsManager:
                 messages=messages,
                 model=model,
                 temperature=gen_temp,
-                max_tokens=gen_tokens
+                max_tokens=gen_tokens,
+                metrics_collector=llm_metrics,
+                metrics_purpose="No-context fallback"
             )
             fallback_duration = time.time() - fallback_start
             logger.info(f"  [Generation Step 1] Fallback answer generation completed (No context). Time taken: {fallback_duration:.3f}s")
@@ -219,7 +227,8 @@ class GuardrailsManager:
                 "faithful": True,
                 "attempts": 1,
                 "invalid_citations": [],
-                "contradictions": []
+                "contradictions": [],
+                "llm_metrics": llm_metrics.to_dict()
             }
 
         # 1. Format the context for prompt input
@@ -237,7 +246,9 @@ class GuardrailsManager:
             messages=messages,
             model=model,
             temperature=gen_temp,
-            max_tokens=gen_tokens
+            max_tokens=gen_tokens,
+            metrics_collector=llm_metrics,
+            metrics_purpose="Initial generation"
         )
         answer = response.choices[0].message.content
         initial_duration = time.time() - initial_start
@@ -264,7 +275,7 @@ class GuardrailsManager:
 
             # Check faithfulness
             faith_start = time.time()
-            eval_data = await self.check_faithfulness(answer, contexts, model=model)
+            eval_data = await self.check_faithfulness(answer, contexts, model=model, metrics_collector=llm_metrics)
             is_faithful = eval_data.get("faithful", True)
             faith_duration = time.time() - faith_start
             logger.info(f"  [Generation Step 2.2 (Attempt {attempt + 1})] Faithfulness check completed. Time taken: {faith_duration:.3f}s")
@@ -285,7 +296,8 @@ class GuardrailsManager:
                     "faithful": True,
                     "attempts": attempt + 1,
                     "invalid_citations": [],
-                    "contradictions": []
+                    "contradictions": [],
+                    "llm_metrics": llm_metrics.to_dict()
                 }
 
             # Gather failure reasons/contradictions
@@ -332,7 +344,9 @@ class GuardrailsManager:
                 messages=messages,
                 model=model,
                 temperature=gen_temp,
-                max_tokens=gen_tokens
+                max_tokens=gen_tokens,
+                metrics_collector=llm_metrics,
+                metrics_purpose=f"Rewrite (attempt {attempt + 1})"
             )
             answer = rewrite_res.choices[0].message.content
             rewrite_duration = time.time() - rewrite_start
@@ -352,5 +366,6 @@ class GuardrailsManager:
             "faithful": False,
             "attempts": max_attempts,
             "invalid_citations": invalid_citations,
-            "contradictions": contradictions
+            "contradictions": contradictions,
+            "llm_metrics": llm_metrics.to_dict()
         }

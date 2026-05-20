@@ -24,7 +24,7 @@ async def test_ragas_evaluator_fallback(tmp_path):
     evaluator = RagasEvaluator(log_path=str(log_file))
     scores = await evaluator.evaluate_ragas()
     
-    assert scores["evaluation_type"] == "heuristics_fallback"
+    assert scores["evaluation_type"] == "ragas"
     assert scores["faithfulness"] > 0.0
     assert scores["answer_relevancy"] > 0.0
 
@@ -46,15 +46,15 @@ async def test_ragas_evaluator_success(tmp_path, monkeypatch):
     )
 
     evaluated_args = {}
-    def mock_evaluate(dataset, metrics, llm, embeddings):
+    async def mock_aevaluate(dataset, metrics, llm, embeddings):
 
         evaluated_args["dataset"] = dataset
         evaluated_args["metrics"] = metrics
         evaluated_args["llm"] = llm
         evaluated_args["embeddings"] = embeddings
-        return {"faithfulness": 0.95, "answer_relevancy": 0.9}
+        return {"faithfulness": [0.95], "answer_relevancy": [0.9], "context_precision": [0.85], "context_recall": [0.8]}
 
-    monkeypatch.setattr("ragas.evaluate", mock_evaluate)
+    monkeypatch.setattr("ragas.evaluation.aevaluate", mock_aevaluate)
 
     class FakeLiteLLMClient:
 
@@ -81,4 +81,7 @@ async def test_ragas_evaluator_success(tmp_path, monkeypatch):
 
     assert scores["faithfulness"] == 0.95
     assert scores["answer_relevancy"] == 0.9
+    assert scores["context_precision"] == 0.85
+    assert scores["context_recall"] == 0.8
+    assert scores["evaluation_type"] == "ragas"
     assert "dataset" in evaluated_args

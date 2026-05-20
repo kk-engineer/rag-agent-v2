@@ -2,7 +2,7 @@
 
 HYDE_GENERATION_PROMPT = """Given the query: '{query}', write a detailed, hypothetical document that answers this query directly. The document should contain relevant facts, terminology, and be optimized for semantic search retrieval.
 
-Hypothetical Document:"""
+Write a hypothetical document below."""
 
 
 CITATION_GENERATION_PROMPT = """System: You are an expert RAG generator. Answer the user query based ONLY on the provided context nodes. Ground every single claim you make with precise inline citations in the format `[Doc-X, p. Y]`, where X is the 0-based document index and Y is the page number. If the document does not specify a page, use `[Doc-X, p. 1]`. Never make claims that are not fully supported by the context.
@@ -13,7 +13,7 @@ Context:
 
 Query: {query}
 
-Answer with Citations:"""
+Write your answer below with [Doc-X, p. Y] citations."""
 
 
 FAITHFULNESS_CHECK_PROMPT = """System: You are an independent RAG faithfulness evaluator. Your task is to analyze the generated answer against the retrieved context nodes. Break down the answer into individual claims, check if each claim is fully supported (entailed) by the context, and output a JSON response.
@@ -38,7 +38,7 @@ Context:
 Answer:
 {answer}
 
-JSON Evaluation:"""
+Respond with valid JSON below."""
 
 
 SELF_CORRECTION_REWRITE_PROMPT = """System: You are an expert RAG self-correction engine. The previous generated answer has failed a faithfulness validation check because it contains claims not supported by the context.
@@ -55,4 +55,4 @@ Unsupported Claims / Contradiction Details:
 Previous Answer:
 {answer}
 
-Corrected Answer with Citations:"""
+Write the corrected answer below."""

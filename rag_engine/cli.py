@@ -53,10 +53,14 @@ class REPLManager:
 
             try:
 
-                user_input = click.prompt(
-                    click.style("\nUser >", fg="blue", bold=True),
-                    prompt_suffix=" "
-                ).strip()
+                loop = asyncio.get_running_loop()
+                user_input = (await loop.run_in_executor(
+                    None,
+                    lambda: click.prompt(
+                        click.style("\nUser >", fg="blue", bold=True),
+                        prompt_suffix=" "
+                    )
+                )).strip()
                 
                 if not user_input:
 

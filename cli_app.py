@@ -1,11 +1,10 @@
 import os
 import time
 import asyncio
-import signal
 import click
 import logging
 import sys
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory, configure_logging
 from rag_engine.cli import REPLManager
 
 
@@ -23,19 +22,13 @@ memory = ConversationMemory(window_size=_memory_window)
 
 # Configure root logging with colored formatter
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
 if not root_logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ColoredFormatter(datefmt="%H:%M:%S"))
     root_logger.addHandler(handler)
+configure_logging()
 logger = logging.getLogger(__name__)
 
-
-def _signal_handler(sig, frame):
-
-    raise KeyboardInterrupt()
-
-signal.signal(signal.SIGINT, _signal_handler)
 
 
 llm_client = LiteLLMClient()
@@ -98,6 +91,37 @@ async def query_callback(query: str):
         f"• \033[1mAvg Match Score:\033[0m {avg_score:.4f}\n"
         f"\033[94m------------------------------------\033[0m\n"
     )
+
+    llm_metrics = result.get("llm_metrics")
+    if llm_metrics:
+        metrics_str += (
+            f"\n"
+            f"\033[95m--- LLM Metrics ---\033[0m\n"
+            f"• \033[1mTotal LLM Calls:\033[0m {llm_metrics['total_calls']}\n"
+            f"• \033[1mTotal Prompt Tokens:\033[0m {llm_metrics['total_prompt_tokens']}\n"
+            f"• \033[1mTotal Completion Tokens:\033[0m {llm_metrics['total_completion_tokens']}\n"
+            f"• \033[1mTotal Tokens:\033[0m {llm_metrics['total_tokens']}\n"
+            f"• \033[1mTotal LLM Time:\033[0m {llm_metrics['total_llm_time_ms']/1000:.3f}s\n"
+            f"• \033[1mPer-call breakdown:\033[0m {llm_metrics['per_call_breakdown_str']}\n"
+            f"\033[95m------------------------------------\033[0m\n"
+        )
+
+    # Log structured metrics
+    logger.info(
+        f"[RAG Metrics] Retrieval: nodes={num_docs}, "
+        f"retrieve={latency_retrieve:.1f}ms, generate={latency_gen:.1f}ms, "
+        f"total={latency:.1f}ms, max_score={top_score:.4f}, avg_score={avg_score:.4f}"
+    )
+    if llm_metrics:
+        logger.info(
+            f"[RAG Metrics] LLM: calls={llm_metrics['total_calls']}, "
+            f"prompt_tks={llm_metrics['total_prompt_tokens']}, "
+            f"completion_tks={llm_metrics['total_completion_tokens']}, "
+            f"total_tks={llm_metrics['total_tokens']}, "
+            f"time={llm_metrics['total_llm_time_ms']/1000:.3f}s, "
+            f"breakdown: {llm_metrics['per_call_breakdown_str']}"
+        )
+
     yield metrics_str
 
 

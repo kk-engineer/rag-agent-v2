@@ -5,6 +5,30 @@ from typing import List, Dict, Any, Union, Generator, AsyncGenerator
 def render_chat_history(messages: List[Dict[str, Any]]):
 
     import streamlit as st
+    st.markdown(
+        """
+        <style>
+        /* 1. Target paragraphs inside chat messages */
+        div[data-testid="stChatMessage"] p { 
+            font-size: 1.2rem !important; 
+        }
+
+        /* 2. Target the text block inside the metric label wrapper */
+        div[data-testid="stMetricLabel"] p { 
+            font-size: 0.7rem !important; 
+        }
+
+        /* 3. Target the inner text container of the metric value */
+        div[data-testid="stMetricValue"] > div { 
+            font-size: 0.85rem !important; 
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if "rag_metrics_css" not in st.session_state:
+        st.session_state.rag_metrics_css = True
     for msg in messages:
 
         role = msg["role"]
@@ -43,6 +67,22 @@ def render_chat_history(messages: List[Dict[str, Any]]):
                         col_m2.metric("Retrieval Latency", "N/A")
                     col_m3.metric("Max Match Score", f"{top_score:.4f}")
                     col_m4.metric("Avg Match Score", f"{avg_score:.4f}")
+
+                    llm_metrics = msg.get("llm_metrics")
+                    if llm_metrics:
+                        st.markdown("##### 🤖 LLM Metrics")
+                        col_l1, col_l2, col_l3, col_l4 = st.columns(4)
+                        col_l1.metric("Total LLM Calls", f"{llm_metrics['total_calls']}")
+                        col_l2.metric("Total Prompt Tokens", f"{llm_metrics['total_prompt_tokens']}")
+                        col_l3.metric("Total Completion Tokens", f"{llm_metrics['total_completion_tokens']}")
+                        col_l4.metric("Total LLM Time", f"{llm_metrics['total_llm_time_ms']/1000:.3f}s")
+                        with st.expander("Per-call breakdown"):
+                            for call in llm_metrics["per_call_breakdown"]:
+                                st.write(
+                                    f"• **{call['purpose']}**: "
+                                    f"{call['elapsed_ms']/1000:.1f}s, "
+                                    f"{call['prompt_tokens']}+{call['completion_tokens']} tokens"
+                                )
                     
                     render_retrieved_sources(retrieved_contexts)
 

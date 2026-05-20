@@ -60,7 +60,7 @@ class RagasEvaluator:
         try:
 
             from datasets import Dataset
-            from ragas import evaluate
+            from ragas.evaluation import aevaluate
             from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
             from ragas.llms import LangchainLLMWrapper
             from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -152,34 +152,22 @@ class RagasEvaluator:
                         openai_api_key=api_key
                     )
                     
-            class CustomRagasEmbeddings(Embeddings):
+            class SyncRagasEmbeddings(Embeddings):
                 def __init__(self, client):
                     self.client = client
                     
                 def embed_documents(self, texts: List[str]) -> List[List[float]]:
-                    import asyncio
-                    import concurrent.futures
-                    
-                    def _run(coro):
-                        loop = asyncio.new_event_loop()
-                        try:
-                            return loop.run_until_complete(coro)
-                        finally:
-                            loop.close()
-                            
-                    try:
-                        loop = asyncio.get_running_loop()
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(_run, self.client.aembedding(texts))
-                            return future.result()
-                    except RuntimeError:
-                        return _run(self.client.aembedding(texts))
+                    if self.client._local_embedder is not None:
+                        return [emb.tolist() for emb in self.client._local_embedder.encode(texts)]
+                    import asyncio, concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                        return pool.submit(asyncio.run, self.client.aembedding(texts)).result()
                         
                 def embed_query(self, text: str) -> List[float]:
                     res = self.embed_documents([text])
                     return res[0] if res else []
                     
-            custom_embeddings = CustomRagasEmbeddings(self.llm_client)
+            custom_embeddings = SyncRagasEmbeddings(self.llm_client)
             
             ragas_llm = LangchainLLMWrapper(chat_model)
             ragas_embeddings = LangchainEmbeddingsWrapper(custom_embeddings)
@@ -205,14 +193,23 @@ class RagasEvaluator:
 
             dataset = Dataset.from_dict(formatted_data)
             
-            result = evaluate(
+            result = await aevaluate(
                 dataset,
                 metrics=metrics,
                 llm=ragas_llm,
                 embeddings=ragas_embeddings
             )
             
-            return dict(result)
+            scores = {}
+            for m in metrics:
+                vals = result[m.name]
+                scores[m.name] = sum(vals) / len(vals) if vals else 0.0
+            scores["evaluation_type"] = "ragas"
+            all_metric_names = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+            for name in all_metric_names:
+                if name not in scores:
+                    scores[name] = None
+            return scores
         except Exception as e:
 
             logger.warning(f"Ragas evaluation failed (falling back to heuristics): {e}")

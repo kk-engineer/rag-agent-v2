@@ -1,4 +1,6 @@
 import os
+import time
+import json
 import yaml
 import logging
 import asyncio
@@ -230,6 +232,8 @@ class LiteLLMClient:
         stream: bool = False,
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
+        metrics_collector: Optional[Any] = None,
+        metrics_purpose: str = "llm_call",
         **kwargs
     ) -> Any:
 
@@ -244,6 +248,8 @@ class LiteLLMClient:
                     stream=stream,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    metrics_collector=metrics_collector,
+                    metrics_purpose=metrics_purpose,
                     **kwargs
                 )
             except Exception as e:
@@ -273,6 +279,10 @@ class LiteLLMClient:
                     target_model = non_embed[0]
                     logger.info(f"Redirecting default local-llm target to configured model: {target_model}")
 
+            start_time = time.time()
+            _display_model = target_model.split("/", 1)[-1] if "/" in target_model else target_model
+            logger.debug(f"--- LLM PROMPT [{_display_model}] ---\n{json.dumps(messages, indent=2)}\n----------------------------")
+
             # Router acompletion
             response = await self.router.acompletion(
                 model=target_model,
@@ -282,6 +292,24 @@ class LiteLLMClient:
                 max_tokens=max_tokens,
                 **kwargs
             )
+
+            elapsed = time.time() - start_time
+            usage = getattr(response, "usage", None)
+            content = response.choices[0].message.content if response.choices else "N/A"
+            logger.debug(
+                f"--- LLM RESPONSE [{_display_model}] ---\n{content}\n"
+                f"----------------------------------\n"
+                f"tokens: in={usage.prompt_tokens if usage else '?'} "
+                f"out={usage.completion_tokens if usage else '?'} "
+                f"total={usage.total_tokens if usage else '?'} | "
+                f"time={elapsed:.3f}s"
+            )
+            if metrics_collector is not None:
+
+                pt = usage.prompt_tokens if usage else 0
+                ct = usage.completion_tokens if usage else 0
+                tt = usage.total_tokens if usage else 0
+                metrics_collector.add_call(metrics_purpose, elapsed * 1000, pt, ct, tt)
             return response
         except Exception as e:
 
@@ -295,6 +323,8 @@ class LiteLLMClient:
         stream: bool = False,
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
+        metrics_collector: Optional[Any] = None,
+        metrics_purpose: str = "llm_call",
         **kwargs
     ) -> Any:
 
@@ -390,10 +420,31 @@ class LiteLLMClient:
 
             try:
 
+                cf_start = time.time()
+                logger.debug(f"--- LLM PROMPT [{provider} / {model}] ---\n{json.dumps(litellm_kwargs.get('messages', messages), indent=2)}\n----------------------------")
+
                 response = await asyncio.wait_for(
                     litellm.acompletion(**litellm_kwargs),
                     timeout=float(timeout)
                 )
+
+                cf_elapsed = time.time() - cf_start
+                cf_usage = getattr(response, "usage", None)
+                cf_content = response.choices[0].message.content if response.choices else "N/A"
+                logger.debug(
+                    f"--- LLM RESPONSE [{provider} / {model}] ---\n{cf_content}\n"
+                    f"----------------------------------\n"
+                    f"tokens: in={cf_usage.prompt_tokens if cf_usage else '?'} "
+                    f"out={cf_usage.completion_tokens if cf_usage else '?'} "
+                    f"total={cf_usage.total_tokens if cf_usage else '?'} | "
+                    f"time={cf_elapsed:.3f}s"
+                )
+                if metrics_collector is not None:
+
+                    pt = cf_usage.prompt_tokens if cf_usage else 0
+                    ct = cf_usage.completion_tokens if cf_usage else 0
+                    tt = cf_usage.total_tokens if cf_usage else 0
+                    metrics_collector.add_call(metrics_purpose, cf_elapsed * 1000, pt, ct, tt)
                 logger.info(f"Cloud completion successful using provider '{provider}'.")
                 return response
             except asyncio.TimeoutError:

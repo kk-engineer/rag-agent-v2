@@ -65,10 +65,8 @@ chroma*
 .agent_backups
 
 # Input files
-input_files/
-#
- PDFs
-*.pdf
+#input_files/
+
 
 # Local HF models
 local_models/

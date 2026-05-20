@@ -6,17 +6,17 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, configure_logging
 from rag_engine.evaluation import RagasEvaluator
 
 
 # Configure root logging with colored formatter
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
 if not root_logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ColoredFormatter(datefmt="%H:%M:%S"))
     root_logger.addHandler(handler)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -155,7 +155,28 @@ async def query_engine(payload: QueryRequest):
                 "score": ctx.get("score")
             })
 
-        logger.info(f"API Query: completed in {latency/1000:.3f}s (Retrieve: {retrieve_duration:.3f}s, Gen/Verify: {gen_duration:.3f}s)")
+        num_docs = len(contexts)
+        scores = [c.get("score", 0.0) for c in contexts]
+        top_score = max(scores) if scores else 0.0
+        avg_score = sum(scores) / num_docs if num_docs > 0 else 0.0
+
+        logger.info(
+            f"[RAG Metrics] Retrieval: nodes={num_docs}, "
+            f"retrieve={retrieve_duration*1000:.1f}ms, generate={gen_duration*1000:.1f}ms, "
+            f"total={latency:.1f}ms, max_score={top_score:.4f}, avg_score={avg_score:.4f}"
+        )
+        llm_metrics = result.get("llm_metrics")
+        if llm_metrics:
+            logger.info(
+                f"[RAG Metrics] LLM: calls={llm_metrics['total_calls']}, "
+                f"prompt_tks={llm_metrics['total_prompt_tokens']}, "
+                f"completion_tks={llm_metrics['total_completion_tokens']}, "
+                f"total_tks={llm_metrics['total_tokens']}, "
+                f"time={llm_metrics['total_llm_time_ms']/1000:.3f}s, "
+                f"breakdown: {llm_metrics['per_call_breakdown_str']}"
+            )
+
+        logger.info(f"API Query: completed in {latency/1000:.3f}s")
         return {
             "query": payload.query,
             "answer": result["answer"],
@@ -164,7 +185,8 @@ async def query_engine(payload: QueryRequest):
             "latency_ms": latency,
             "retrieve_latency_ms": retrieve_duration * 1000,
             "generation_latency_ms": gen_duration * 1000,
-            "retrieved_nodes": clean_contexts
+            "retrieved_nodes": clean_contexts,
+            "llm_metrics": result.get("llm_metrics")
         }
     except Exception as e:
 

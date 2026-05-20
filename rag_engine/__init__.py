@@ -116,6 +116,38 @@ if not engine_logger.handlers:
     engine_logger.propagate = False
 engine_logger.addFilter(zoedepth_filter)
 
+_logging_configured = False
+
+
+def configure_logging(config_path: str = "config/rag_config.toml"):
+
+    global _logging_configured
+    if _logging_configured:
+
+        return
+
+    try:
+
+        with open(config_path, "rb") as f:
+
+            import tomllib
+            config = tomllib.load(f)
+            level_name = config.get("logging", {}).get("level", "INFO")
+            level = getattr(logging, level_name.upper(), logging.INFO)
+            logging.getLogger("rag_engine").setLevel(level)
+            logging.getLogger().setLevel(level)
+            if not logging.getLogger().handlers:
+                handler = logging.StreamHandler(sys.stdout)
+                handler.setFormatter(ColoredFormatter(datefmt="%H:%M:%S"))
+                logging.getLogger().addHandler(handler)
+            for noisy in ["httpx", "httpcore", "LiteLLM"]:
+                logging.getLogger(noisy).setLevel(logging.WARNING)
+            engine_logger.info(f"Log level set to {level_name}")
+            _logging_configured = True
+    except Exception as e:
+
+        engine_logger.warning(f"Failed to load logging config: {e}")
+
 
 
 from rag_engine.llm import LiteLLMClient
@@ -123,6 +155,7 @@ from rag_engine.core import RAGCoreEngine, Document
 from rag_engine.guardrails import GuardrailsManager
 from rag_engine.utils.logger import QueryLogger
 from rag_engine.memory import ConversationMemory
+from rag_engine.metrics import LLMMetricsCollector
 
 
 __all__ = [
@@ -132,4 +165,6 @@ __all__ = [
     "GuardrailsManager",
     "QueryLogger",
     "ConversationMemory",
+    "configure_logging",
+    "LLMMetricsCollector",
 ]

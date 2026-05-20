@@ -1,6 +1,7 @@
 import os
 import warnings
 import logging
+from rag_engine import configure_logging
 
 # Suppress Hugging Face / Transformers warning messages and path lookup alerts
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
@@ -11,6 +12,7 @@ warnings.filterwarnings("ignore", message=".*zoedepth.*")
 
 # Silence transformers module logging
 logging.getLogger("transformers").setLevel(logging.ERROR)
+configure_logging()
 
 
 class ZoedepthWarningFilter(logging.Filter):
@@ -37,7 +39,10 @@ logging.getLogger().addFilter(zoedepth_filter)
 import streamlit as st
 import asyncio
 import time
+import logging
 from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ConversationMemory
+
+logger = logging.getLogger(__name__)
 from rag_engine.ui import (
     render_chat_history,
     render_reasoning_step,
@@ -328,18 +333,20 @@ with st.sidebar:
             else:
 
                 st.markdown("**Offline Metrics:**")
+                def _fmt(val):
+                    return "N/A" if val is None else f"{val:.4f}"
                 col1, col2 = st.columns(2)
-                col1.metric("Faithfulness", f"{scores.get('faithfulness', 0.0):.4f}")
-                col2.metric("Answer Relevancy", f"{scores.get('answer_relevancy', 0.0):.4f}")
+                col1.metric("Faithfulness", _fmt(scores.get('faithfulness')))
+                col2.metric("Answer Relevancy", _fmt(scores.get('answer_relevancy')))
                 col3, col4 = st.columns(2)
-                col3.metric("Context Precision", f"{scores.get('context_precision', 0.0):.4f}")
-                col4.metric("Context Recall", f"{scores.get('context_recall', 0.0):.4f}")
+                col3.metric("Context Precision", _fmt(scores.get('context_precision')))
+                col4.metric("Context Recall", _fmt(scores.get('context_recall')))
                 st.caption(f"Evaluation Method: {scores.get('evaluation_type', 'RAGAS')}")
 
 
 # Main Content Area
-st.title("🤖 Enterprise RAG Engine")
-st.caption("Stateless modular retrieval with verification feedback loops")
+st.title("🤖 RoboSathi RAG Engine")
+st.caption("Upload documents - Ask Questions")
 
 # Render Chat UI
 render_chat_history(st.session_state.chat_history)
@@ -404,8 +411,28 @@ if st.session_state.generating and st.session_state.pending_query:
 
         answer = result["answer"]
         
-        # Log metrics to JSONL file
+        # Log structured metrics
         latency_total = (time.time() - start_time) * 1000
+        num_docs = len(retrieved_contexts)
+        scores = [c.get("score", 0.0) for c in retrieved_contexts]
+        top_score = max(scores) if scores else 0.0
+        avg_score = sum(scores) / num_docs if num_docs > 0 else 0.0
+        logger.info(
+            f"[RAG Metrics] Retrieval: nodes={num_docs}, "
+            f"retrieve={latency_retrieve:.1f}ms, "
+            f"total={latency_total:.1f}ms, max_score={top_score:.4f}, avg_score={avg_score:.4f}"
+        )
+        llm_metrics = result.get("llm_metrics")
+        if llm_metrics:
+            logger.info(
+                f"[RAG Metrics] LLM: calls={llm_metrics['total_calls']}, "
+                f"prompt_tks={llm_metrics['total_prompt_tokens']}, "
+                f"completion_tks={llm_metrics['total_completion_tokens']}, "
+                f"total_tks={llm_metrics['total_tokens']}, "
+                f"time={llm_metrics['total_llm_time_ms']/1000:.3f}s, "
+                f"breakdown: {llm_metrics['per_call_breakdown_str']}"
+            )
+
         run_async(st.session_state.query_logger.log_query(
             query=user_query,
             response=answer,
@@ -428,7 +455,8 @@ if st.session_state.generating and st.session_state.pending_query:
             "role": "assistant",
             "content": final_answer,
             "retrieved_contexts": retrieved_contexts,
-            "latency_retrieve": latency_retrieve
+            "latency_retrieve": latency_retrieve,
+            "llm_metrics": result.get("llm_metrics")
         })
 
     st.session_state.memory.add_turn(user_query, final_answer)
