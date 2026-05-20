@@ -1,6 +1,6 @@
 # RoboSathi RAG Engine 🤖
 
-A local-first, production-ready RAG (Retrieval-Augmented Generation) system that answers questions from your document library with verified citations. Runs on your machine — no cloud dependency required.
+RAG (Retrieval-Augmented Generation) system that answers questions from your document library with verified citations. Runs on your machine — no cloud dependency required.
 
 ---
 
