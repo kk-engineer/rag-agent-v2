@@ -1,0 +1,73 @@
+[llm]
+mode = "cloud" # Options: "local", "cloud"
+
+[llm.local]
+model_name = "llama-cpp-llm"
+
+[[llm.local.model_list]]
+model_name = "llama-cpp-llm"
+[llm.local.model_list.litellm_params]
+model = "mistral-nemo-12b"
+api_base = "http://localhost:8000/v1"
+api_key = "llama.cpp"
+
+[llm.cloud]
+timeout = 60
+provider_order = ["nvidia", "gemini", "openrouter", "huggingface", "deepseek", "openai", "anthropic"]
+
+[llm.cloud.nvidia]
+base_url = "https://integrate.api.nvidia.com/v1"
+model    = "meta/llama-3.1-8b-instruct"
+
+[llm.cloud.gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+model    = "gemini-2.0-flash"
+
+[llm.cloud.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+model    = "google/gemini-2.0-flash-lite-preview-02-05:free"
+
+[llm.cloud.huggingface]
+base_url = "https://api-inference.huggingface.co/v1"
+model    = "mistralai/Mistral-7B-Instruct-v0.3"
+
+[llm.cloud.deepseek]
+base_url = "https://api.deepseek.com/v1"
+model    = "deepseek-chat"
+
+[llm.cloud.openai]
+model    = "gpt-4o-mini"
+
+[llm.cloud.anthropic]
+model    = "claude-3-5-sonnet-latest"
+
+
+# Embedding Config
+[embedding]
+mode = "local" # Options: "local", "cloud"
+
+[embedding.local]
+model_name = "local-embedding"
+
+[[embedding.local.model_list]]
+model_name = "local-embedding"
+[embedding.local.model_list.litellm_params]
+model = "nomic-embed-text"
+api_base = "http://localhost:8001/v1"
+api_key = "llama.cpp"
+
+[embedding.cloud]
+timeout = 60
+provider_order = ["gemini", "nvidia", "openai"]
+
+[embedding.cloud.openai]
+model = "text-embedding-3-small"
+
+[embedding.cloud.nvidia]
+base_url = "https://integrate.api.nvidia.com/v1"
+model = "nvidia/embeddings-nv-embed-qa-4"
+
+[embedding.cloud.gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+model = "text-embedding-004"
+

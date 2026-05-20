@@ -1,0 +1,77 @@
+# --- Python Artifacts ---
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Virtual Environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Environment Secrets (CRITICAL) ---
+.env
+.env.local
+.env.*
+secrets.json
+
+# --- AI/LLM Specific ---
+.langchain/
+.langgraph/
+.cache/
+data/           # Ignore local databases/vector stores
+*.log           # Ignore agent logs
+
+# --- macOS Specific ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# -- DB
+db/*
+db*
+chroma*
+*.db
+*.sqlite*
+
+# --- IDEs ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Agent backups
+.agent_backups
+
+# Input files
+input_files/
+#
+ PDFs
+*.pdf
+
+# Local HF models
+local_models/
+
+# Log files
+logs/
