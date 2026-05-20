@@ -6,7 +6,8 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, configure_logging
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, configure_logging, build_citation_map, QueryRouter
+from rag_engine.prompts import DIRECT_LLM_SYSTEM_PROMPT
 from rag_engine.evaluation import RagasEvaluator
 
 
@@ -28,6 +29,7 @@ llm_client = LiteLLMClient()
 core_engine = RAGCoreEngine(llm_client)
 guardrails = GuardrailsManager(llm_client)
 query_logger = QueryLogger()
+query_router = QueryRouter(llm_client)
 evaluator = RagasEvaluator(llm_client=llm_client)
 
 
@@ -105,6 +107,34 @@ async def query_engine(payload: QueryRequest):
     start_time = time.time()
     try:
 
+        # 0. Route the query
+        route_result = await query_router.route_query(payload.query)
+        if route_result["route"] == "DIRECT_LLM":
+            messages = [
+                {"role": "system", "content": DIRECT_LLM_SYSTEM_PROMPT},
+                {"role": "user", "content": payload.query},
+            ]
+            response = await llm_client.acompletion(messages, temperature=0.7)
+            answer = response.choices[0].message.content
+            latency = (time.time() - start_time) * 1000
+            await query_logger.log_query(
+                query=payload.query,
+                response=answer,
+                retrieved_nodes=[],
+                latency_ms=latency,
+                metadata={"routing": "direct_llm"}
+            )
+            logger.info(f"[RAG Metrics] Route: DIRECT_LLM, Latency: {latency:.1f}ms")
+            return {
+                "query": payload.query,
+                "answer": answer,
+                "route": "DIRECT_LLM",
+                "latency_ms": latency,
+                "retrieved_nodes": [],
+                "llm_metrics": None,
+                "citation_map": {}
+            }
+
         # 1. Search core retrieve engine
         retrieve_start = time.time()
         contexts = await core_engine.search(
@@ -177,16 +207,18 @@ async def query_engine(payload: QueryRequest):
             )
 
         logger.info(f"API Query: completed in {latency/1000:.3f}s")
+        answer = result["answer"]
         return {
             "query": payload.query,
-            "answer": result["answer"],
+            "answer": answer,
             "faithful": result.get("faithful", True),
             "retries": result.get("attempts", 1),
             "latency_ms": latency,
             "retrieve_latency_ms": retrieve_duration * 1000,
             "generation_latency_ms": gen_duration * 1000,
             "retrieved_nodes": clean_contexts,
-            "llm_metrics": result.get("llm_metrics")
+            "llm_metrics": result.get("llm_metrics"),
+            "citation_map": build_citation_map(answer, contexts)
         }
     except Exception as e:
 

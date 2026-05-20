@@ -1,5 +1,6 @@
 import asyncio
 from typing import List, Dict, Any, Union, Generator, AsyncGenerator
+from rag_engine.guardrails import build_citation_map
 
 
 def render_chat_history(messages: List[Dict[str, Any]]):
@@ -84,6 +85,12 @@ def render_chat_history(messages: List[Dict[str, Any]]):
                                     f"{call['prompt_tokens']}+{call['completion_tokens']} tokens"
                                 )
                     
+                    citation_map = build_citation_map(content, retrieved_contexts)
+                    if citation_map:
+                        st.markdown("##### 📖 Cited Sources")
+                        for ref, info in citation_map.items():
+                            st.write(f"{ref} → {info['filename']} (p. {info['page']})")
+
                     render_retrieved_sources(retrieved_contexts)
 
 

@@ -25,7 +25,7 @@ k = 1.0
 # top_n: Number of final document nodes to return after all retrieval and reranking steps.
 # Acceptable values: positive integers (typically 3 to 10).
 # Increasing top_n provides more context to the LLM but increases API tokens and latency.
-top_n = 3
+top_n = 5
 
 # use_hyde: Enables/disables Hypothetical Document Embeddings (HyDE) expansion.
 # Acceptable values: boolean (true or false).
@@ -73,6 +73,18 @@ max_tokens = 8192
 # If the generated answer fails faithfulness or citation checks, the engine rewrites it
 # with self-correction prompts up to this many attempts.
 max_attempts = 3
+
+[vector_store]
+# mode: Storage backend for document chunk embeddings.
+# "in-memory" — stores everything in process memory (current behavior, no persistence).
+# "persist"    — stores embeddings in ChromaDB on disk, survives restarts.
+mode = "persist"
+
+# persist_dir: Directory path for ChromaDB persistent storage (only used when mode = "persist").
+persist_dir = "chroma_db"
+
+# collection_name: ChromaDB collection name for document chunks.
+collection_name = "rag_documents"
 
 [logging]
 # level: Logging verbosity level. Acceptable values: "DEBUG", "INFO", "WARNING", "ERROR".

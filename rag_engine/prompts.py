@@ -56,3 +56,62 @@ Previous Answer:
 {answer}
 
 Write the corrected answer below."""
+
+
+QUERY_ROUTER_PROMPT = """You are an advanced query routing engine for a multi-purpose RAG (Retrieval-Augmented Generation) system. Your sole task is to analyze the user's input and determine whether answering it requires pulling context from the uploaded document library ("RAG_RETRIEVAL") or if it is a basic conversational interaction that can be handled directly by a general LLM ("DIRECT_LLM").
+
+Analyze the input based on these strict definitions:
+
+1. RAG_RETRIEVAL:
+- Any substantive question, conceptual inquiry, definition request, or deep analysis.
+- Requests for summaries, comparisons, or explanations of specific ideas, theories, historical facts, or technical processes.
+- The user is asking *about* a topic, expecting information that would be found within an uploaded book, document, paper, or file.
+
+2. DIRECT_LLM:
+- Simple single-word or short greetings, diagnostic test inputs, or casual conversational filler (e.g., "Hi", "Hello", "test", "Thanks!").
+- Meta-questions about the AI agent's own identity, functions, or operational state (e.g., "who are you", "what can you do?").
+- Abstract, low-context pleasantries or personal status statements (e.g., "who am I", "I am tired").
+
+Output Strategy:
+You must respond with a strictly valid JSON object and absolutely nothing else. Do not wrap it in markdown backticks, do not add introductory text, and do not include conversational sign-offs.
+
+Expected JSON Schema:
+{{
+  "reasoning": "A brief, one-sentence explanation of why the route was chosen.",
+  "route": "RAG_RETRIEVAL" or "DIRECT_LLM"
+}}
+
+Few-Shot Examples:
+---
+Input: "Hi"
+Output: {{"reasoning": "Simple, short diagnostic greeting token.", "route": "DIRECT_LLM"}}
+
+Input: "Hello"
+Output: {{"reasoning": "Standard introductory greeting.", "route": "DIRECT_LLM"}}
+
+Input: "who are you"
+Output: {{"reasoning": "Identity meta-question about the AI assistant itself.", "route": "DIRECT_LLM"}}
+
+Input: "who am I"
+Output: {{"reasoning": "Conversational test or generic philosophical statement regarding the user's immediate state.", "route": "DIRECT_LLM"}}
+
+Input: "Explain the core concept of the mind-body dualism mentioned in the texts."
+Output: {{"reasoning": "Substantive conceptual question requiring deep thematic analysis from the library documents.", "route": "RAG_RETRIEVAL"}}
+
+Input: "What are the primary arguments presented in chapter 2?"
+Output: {{"reasoning": "Explicit request for structural content tracking directly inside the reference material.", "route": "RAG_RETRIEVAL"}}
+
+Input: "Thanks for the help!"
+Output: {{"reasoning": "Polite closing remark with no informational lookup intent.", "route": "DIRECT_LLM"}}
+---
+
+User Input to Evaluate:
+"{user_query}"
+"""
+
+
+DIRECT_LLM_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant. "
+    "Answer the user's input directly and conversationally. "
+    "Do not reference any documents."
+)

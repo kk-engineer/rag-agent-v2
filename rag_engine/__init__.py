@@ -152,10 +152,11 @@ def configure_logging(config_path: str = "config/rag_config.toml"):
 
 from rag_engine.llm import LiteLLMClient
 from rag_engine.core import RAGCoreEngine, Document
-from rag_engine.guardrails import GuardrailsManager
+from rag_engine.guardrails import GuardrailsManager, build_citation_map
 from rag_engine.utils.logger import QueryLogger
 from rag_engine.memory import ConversationMemory
 from rag_engine.metrics import LLMMetricsCollector
+from rag_engine.query_router import QueryRouter
 
 
 __all__ = [
@@ -167,4 +168,6 @@ __all__ = [
     "ConversationMemory",
     "configure_logging",
     "LLMMetricsCollector",
+    "build_citation_map",
+    "QueryRouter",
 ]

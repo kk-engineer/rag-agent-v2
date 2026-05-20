@@ -23,6 +23,7 @@ from rank_bm25 import BM25Okapi
 
 from rag_engine.prompts import HYDE_GENERATION_PROMPT
 from rag_engine.llm import LiteLLMClient
+from rag_engine.ingestion import sha256_file, get_mtime
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,8 @@ class RAGCoreEngine:
         self.child_nodes: List[Dict[str, Any]] = []
         self.bm25: Optional[BM25Okapi] = None
         self.lock = asyncio.Lock()
+        self.vector_store = None
+        self._ingestion = None
         
         # Load RAG configuration
         self.config = {
@@ -92,6 +95,11 @@ class RAGCoreEngine:
                 "embedder_local_dir": "local_models/all-MiniLM-L6-v2",
                 "reranker_repo_id": "cross-encoder/ms-marco-MiniLM-L-6-v2",
                 "reranker_local_dir": "local_models/ms-marco-MiniLM-L-6-v2"
+            },
+            "vector_store": {
+                "mode": "in-memory",
+                "persist_dir": "chroma_db",
+                "collection_name": "rag_documents"
             }
         }
         
@@ -103,7 +111,7 @@ class RAGCoreEngine:
 
                     import tomllib
                     loaded = tomllib.load(f)
-                    for section in ["chunking", "retrieval", "generation", "guardrails", "models"]:
+                    for section in ["chunking", "retrieval", "generation", "guardrails", "models", "vector_store"]:
 
                         if section in loaded:
 
@@ -112,6 +120,77 @@ class RAGCoreEngine:
             except Exception as e:
 
                 logger.warning(f"Failed to load RAG config: {e}")
+
+        self.vs_mode = self.config.get("vector_store", {}).get("mode", "in-memory")
+        if self.vs_mode == "persist":
+
+            self._init_persist()
+
+
+    def _init_persist(self):
+
+        vs_cfg = self.config.get("vector_store", {})
+        persist_dir = vs_cfg.get("persist_dir", "chroma_db")
+        collection_name = vs_cfg.get("collection_name", "rag_documents")
+
+        from rag_engine.vector_store import VectorStore
+
+        self.vector_store = VectorStore(
+            persist_dir=persist_dir, collection_name=collection_name
+        )
+
+        model_name = self.config.get("models", {}).get(
+            "embedder_repo_id", "sentence-transformers/all-MiniLM-L6-v2"
+        )
+        self.vector_store.initialize(embedding_model=model_name)
+
+        if not self.vector_store.is_data_valid(model_name):
+
+            logger.warning(
+                f"Embedding model mismatch in persisted store. "
+                f"Run IngestionCoordinator.full_reindex() to rebuild."
+            )
+
+        self.child_nodes = self.vector_store.get_all_chunks()
+
+        # defensive dedup: keep first occurrence of (text, source, page_number)
+        seen = set()
+        unique = []
+        dup_ids = []
+        for node in self.child_nodes:
+            key = (node.get("text"), node.get("source"), node.get("page_number"))
+            if key in seen:
+                cid = node.get("child_id")
+                if cid:
+                    dup_ids.append(cid)
+            else:
+                seen.add(key)
+                unique.append(node)
+        if dup_ids:
+            logger.warning(
+                f"Found {len(dup_ids)} duplicate chunks in persisted store "
+                f"— keeping first occurrence, removing {len(dup_ids)} from ChromaDB"
+            )
+            self.child_nodes = unique
+            try:
+                self.vector_store.collection.delete(ids=dup_ids)
+            except Exception as e:
+                logger.warning(f"Failed to clean duplicates from ChromaDB: {e}")
+
+        parents_data = self.vector_store.load_parents()
+        self.parent_store = {}
+        for pid, pdata in parents_data.items():
+
+            from rag_engine.core import Document
+            self.parent_store[pid] = Document(
+                pid, pdata["content"], pdata.get("metadata", {})
+            )
+
+        self._update_bm25_index()
+        logger.info(
+            f"Persist mode initialized: {len(self.child_nodes)} chunks, "
+            f"{len(self.parent_store)} parents"
+        )
 
 
     async def parse_file(self, file_path: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -268,10 +347,74 @@ class RAGCoreEngine:
         return semantic_chunks
 
 
+    def _purge_file(self, file_path: str):
+
+        before = len(self.child_nodes)
+        self.child_nodes = [
+            n for n in self.child_nodes if n.get("source") != file_path
+        ]
+        self.parent_store = {
+            pid: doc for pid, doc in self.parent_store.items()
+            if doc.metadata.get("source") != file_path
+        }
+        removed = before - len(self.child_nodes)
+        if removed:
+            logger.info(f"Purged {removed} stale chunks for '{os.path.basename(file_path)}'")
+            self._update_bm25_index()
+
+    def deduplicate(self) -> dict:
+
+        seen = set()
+        keep = []
+        dup_ids = []
+        for node in self.child_nodes:
+            key = (node.get("text"), node.get("source"), node.get("page_number"))
+            if key in seen:
+                dup_ids.append(node.get("child_id"))
+            else:
+                seen.add(key)
+                keep.append(node)
+
+        before = len(self.child_nodes)
+        self.child_nodes = keep
+
+        if dup_ids and self.vs_mode == "persist" and self.vector_store:
+            try:
+                self.vector_store.collection.delete(ids=dup_ids)
+                logger.info(f"Deleted {len(dup_ids)} duplicate IDs from ChromaDB")
+            except Exception as e:
+                logger.warning(f"Failed to delete duplicates from ChromaDB: {e}")
+
+        if dup_ids:
+            self._update_bm25_index()
+
+        result = {"removed": len(dup_ids), "remaining": len(self.child_nodes)}
+        logger.info(f"Deduplication complete: removed={result['removed']}, remaining={result['remaining']}")
+        return result
+
+    def clean_database(self) -> dict:
+
+        before = len(self.child_nodes)
+        self.child_nodes = []
+        self.parent_store = {}
+        self.bm25 = None
+
+        if self.vs_mode == "persist" and self.vector_store:
+            self.vector_store.delete_all()
+
+        logger.info(f"Database cleaned: removed {before} chunks")
+        return {"cleared": before}
+
     @trace(tags=["core_engine"])
     async def ingest_file(self, file_path: str) -> str:
 
+        if self.vs_mode == "persist":
+
+            return await self._ingest_file_persist(file_path)
+
         async with self.lock:
+
+            self._purge_file(file_path)
 
             doc_start_time = time.time()
             filename = os.path.basename(file_path)
@@ -330,6 +473,90 @@ class RAGCoreEngine:
             total_duration = time.time() - doc_start_time
             logger.info(f"Successfully ingested file '{filename}' in {total_duration:.3f}s (Parsed: {parse_duration:.3f}s, Chunked: {chunk_duration:.3f}s, Embedded: {embed_duration:.3f}s, BM25 Indexed: {bm25_duration:.3f}s)")
             
+            return doc_id
+
+
+    async def _ingest_file_persist(self, file_path: str) -> str:
+
+        async with self.lock:
+
+            ledger = self.vector_store.get_ledger()
+            entry = ledger.get(str(file_path))
+            if entry:
+                old_id = entry["file_id"]
+                self.vector_store.delete_document(old_id)
+                self.vector_store.remove_ledger_entry(str(file_path))
+                self.child_nodes = [
+                    n for n in self.child_nodes
+                    if n.get("parent_id") != old_id and n.get("file_id") != old_id
+                ]
+                self.parent_store.pop(old_id, None)
+                logger.info(f"Removed stale persist data for file_id={old_id}")
+
+            doc_start_time = time.time()
+            filename = os.path.basename(file_path)
+            logger.info(f"[Persist] Starting ingestion for file: {filename}")
+            doc_id = str(uuid.uuid4())
+
+            parse_start = time.time()
+            full_text, pages = await self.parse_file(file_path)
+            parse_duration = time.time() - parse_start
+
+            chunk_start = time.time()
+            chunks = await self.chunk_semantically(pages)
+            chunk_duration = time.time() - chunk_start
+
+            embed_start = time.time()
+            chunk_texts = [c["text"] for c in chunks]
+            embeddings = await self.llm_client.aembedding(chunk_texts)
+            embed_duration = time.time() - embed_start
+
+            chunk_ids = self.vector_store.add_chunks_batch(
+                chunks=chunks,
+                embeddings=embeddings,
+                file_id=doc_id,
+                source=file_path,
+                filename=filename,
+            )
+
+            doc = Document(
+                doc_id=doc_id,
+                content=full_text,
+                metadata={"source": file_path, "filename": filename},
+            )
+            self.parent_store[doc_id] = doc
+            self.vector_store.save_parents(self.parent_store)
+
+            for i, chunk in enumerate(chunks):
+                self.child_nodes.append({
+                    "child_id": chunk_ids[i],
+                    "parent_id": doc_id,
+                    "file_id": doc_id,
+                    "text": chunk["text"],
+                    "page_number": chunk["page_number"],
+                    "embedding": embeddings[i],
+                    "source": file_path,
+                    "filename": filename,
+                })
+
+            self.vector_store.update_ledger_entry(
+                file_path=str(file_path),
+                file_id=doc_id,
+                sha256=sha256_file(file_path),
+                last_modified=get_mtime(file_path),
+                chunk_ids=chunk_ids,
+            )
+
+            bm25_start = time.time()
+            self._update_bm25_index()
+            bm25_duration = time.time() - bm25_start
+
+            total_duration = time.time() - doc_start_time
+            logger.info(
+                f"[Persist] Ingested '{filename}' in {total_duration:.3f}s "
+                f"(Parse: {parse_duration:.3f}s, Chunk: {chunk_duration:.3f}s, "
+                f"Embed: {embed_duration:.3f}s, BM25: {bm25_duration:.3f}s)"
+            )
             return doc_id
 
 

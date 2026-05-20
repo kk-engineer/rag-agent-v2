@@ -1,6 +1,6 @@
 # RAG Engine Code Workflow
 
-This document explains the technical details, code architecture, directory structure, module responsibilities, and step-by-step query execution flow of the `rag_engine` library.
+This document explains the technical architecture, directory structure, module responsibilities, and step-by-step execution flow of the `rag_engine` library.
 
 ---
 
@@ -8,42 +8,45 @@ This document explains the technical details, code architecture, directory struc
 
 ```
 rag_agent_v2/
-├── .streamlit/
-│   └── config.toml             # Custom Meta Blue Streamlit theme setup
 ├── config/
-│   ├── llm_config.toml         # Local LLM, Cloud LLM config & ordered providers
-│   └── rag_config.toml         # Chunking, Retrieval, Generation, and Guardrails config
-├── input_files/                # Ingestible files repository
-├── local_models/               # Automatically downloaded embedder & reranker files
-├── logs/                       # Telemetry metrics output logs
+│   ├── llm_config.toml         # LLM provider definitions: local model, cloud endpoints, provider order, timeouts
+│   └── rag_config.toml         # All RAG pipeline parameters: chunking, retrieval, generation, guardrails, vector store, logging
+├── input_files/                # Place documents here for ingestion (.pdf, .html, .md, .txt, .py, .js)
+├── local_models/               # Auto-downloaded Hugging Face models (embedder + cross-encoder)
+├── logs/                       # Query telemetry in JSONL format (consumed by RAGAS evaluator)
+├── chroma_db/                  # Persistent vector store directory (auto-created in persist mode)
 ├── rag_engine/
-│   ├── __init__.py             # Module namespace registrations
-│   ├── cli.py                  # CLI controller and loop handlers
-│   ├── core.py                 # Parsers, chunker, indexer, retrieval and reranking logic
-│   ├── evaluation.py           # Telemetry metrics evaluator (Ragas & fallback metrics)
-│   ├── guardrails.py           # Citation validation and faithfulness self-correction loops
-│   ├── llm.py                  # LiteLLM client, local downloading, and Cloud fallbacks
-│   ├── prompts.py              # Externalized system & generation templates
-│   ├── ui.py                   # Streamlit layout styling fragments
-│   └── utils/
-│       ├── __init__.py
-│       └── logger.py           # Async file logger for telemetry outputs
-├── tests/                      # pytest verification suite
-├── api.py                      # FastAPI microservice
-├── cli_app.py                  # Click terminal REPL interface
-├── ui_app.py                   # Streamlit custom web app
-└── pyproject.toml              # Project dependencies managed by uv
+│   ├── __init__.py             # Module exports, ColoredFormatter, configure_logging(), ZoedepthWarningFilter
+│   ├── cli.py                  # REPLManager: interactive CLI loop with /command routing
+│   ├── core.py                 # RAGCoreEngine: parsers, semantic chunker, hybrid search, in-memory + persist ops
+│   ├── evaluation.py           # RagasEvaluator: offline quality metrics from telemetry logs
+│   ├── guardrails.py           # GuardrailsManager: citation validation, faithfulness check, self-correction loop
+│   ├── ingestion.py            # IngestionCoordinator: directory scanning, SHA-256 change detection, full reindex
+│   ├── llm.py                  # LiteLLMClient: multi-provider completion/embedding/reranking with fallback chain
+│   ├── memory.py               # ConversationMemory: sliding-window chat history
+│   ├── metrics.py              # LLMMetricsCollector: per-call token/timing breakdowns
+│   ├── prompts.py              # All prompt templates in one place (7 prompts)
+│   ├── query_router.py         # QueryRouter: classifies input intent (RAG_RETRIEVAL vs DIRECT_LLM)
+│   ├── ui.py                   # Streamlit UI components: chat renderer, source cards, citation map display
+│   ├── utils/
+│   │   └── logger.py           # QueryLogger: async JSONL file logger
+│   └── vector_store.py         # VectorStore: ChromaDB lifecycle, ingestion ledger, collection swap
+├── tests/                      # pytest suite (17+ tests covering core, guardrails, LLM, evaluation, logger)
+├── api.py                      # FastAPI application with /ingest, /query, /eval endpoints
+├── cli_app.py                  # CLI entry point — initializes all components, runs REPL loop
+├── ui_app.py                   # Streamlit entry point — sidebar, chat UI, ingestion browser, maintenance tools
+└── pyproject.toml              # Project metadata + uv-managed dependencies
 ```
 
 ---
 
-## Technical Architecture & Dependency Flow
+## Dependency Graph
 
 ```mermaid
 graph TD
     %% Configuration Files
-    config_llm["llm_config.toml"]
-    config_rag["rag_config.toml"]
+    config_llm["config/llm_config.toml"]
+    config_rag["config/rag_config.toml"]
 
     %% Application Entry Points
     cli_app["cli_app.py"]
@@ -55,18 +58,25 @@ graph TD
     llm_client["rag_engine/llm.py"]
     core_engine["rag_engine/core.py"]
     guardrails["rag_engine/guardrails.py"]
+    router["rag_engine/query_router.py"]
     telemetry_logger["rag_engine/utils/logger.py"]
     evaluator["rag_engine/evaluation.py"]
+    memory["rag_engine/memory.py"]
 
     %% Dependencies
+    cli_app --> router
     cli_app --> core_engine
     cli_app --> guardrails
     cli_app --> telemetry_logger
+    cli_app --> memory
 
+    ui_app --> router
     ui_app --> core_engine
     ui_app --> guardrails
     ui_app --> telemetry_logger
+    ui_app --> memory
 
+    api_app --> router
     api_app --> core_engine
     api_app --> guardrails
     api_app --> evaluator
@@ -75,6 +85,8 @@ graph TD
     core_engine --> prompts
     guardrails --> llm_client
     guardrails --> prompts
+    router --> llm_client
+    router --> prompts
 
     llm_client --> config_llm
     core_engine --> config_rag
@@ -83,172 +95,309 @@ graph TD
 
 ---
 
-## Detailed File Workflows & Module Responsibilities
+## Module Responsibilities
 
-### 1. Configuration Layer
+### `config/llm_config.toml`
+- Declares operational profiles for LLMs: `llm.mode` (`"local"` or `"cloud"`), local model path, base URL
+- Specifies `provider_order` list (e.g., `["nvidia", "gemini", "openrouter"]`) for ordered cloud fallback
+- Configures per-provider timeouts
 
-#### `config/llm_config.toml`
-* **Purpose**: Declares the operational profiles of LLMs (local vs. cloud router endpoints).
-* **Details**:
-  * Configures `llm.mode` (determines default fallback routing: `"local"` vs. `"cloud"`).
-  * Exposes local parameters (base url and local model path).
-  * Specifies `provider_order` list (e.g. `["nvidia", "gemini", "openrouter"]`) and specific request timeouts for the ordered cloud router traversal.
-
-#### `config/rag_config.toml`
-* **Purpose**: Consolidates all parameters of the RAG pipeline.
-* **Details**:
-  * `[chunking]`: Sets parsing rules (`max_chunk_size`, standard deviation threshold `k` for semantic clustering).
-  * `[retrieval]`: Adjusts context outputs (`top_n`, `use_hyde`, RRF penalty metric `rrf_k`, and hybrid weights `rrf_weight_sparse` / `rrf_weight_dense`).
-  * `[generation]`: Adjusts LLM response variables (`temperature` and `max_tokens` limits).
-  * `[guardrails]`: Exposes self-correction loop rules (`max_attempts`).
-  * `[models]`: Maps Hugging Face repository source IDs and destination folders for embedding and reranking assets.
+### `config/rag_config.toml`
+- `[chunking]` — `max_chunk_size` (default 1500), `k` (semantic threshold multiplier)
+- `[retrieval]` — `top_n`, `use_hyde`, `rrf_k`, `rrf_weight_sparse`, `rrf_weight_dense`
+- `[generation]` — `temperature`, `max_tokens`
+- `[guardrails]` — `max_attempts` (self-correction iterations)
+- `[models]` — Hugging Face repo IDs + local directories for embedder and reranker
+- `[vector_store]` — `mode` (`"in-memory"` or `"persist"`), `persist_dir`, `collection_name`
+- `[logging]` — `level` (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
 
 ---
 
-### 2. Core RAG Pipeline
+### `rag_engine/prompts.py`
+Central repository for all LLM instructions. Contains 7 prompts:
 
-#### `rag_engine/prompts.py`
-* **Purpose**: Serves as the central repository for LLM instructions.
-* **Details**:
-  * `HYDE_GENERATION_PROMPT`: Instructs LLMs to write hypothetical candidate documents matching queries.
-  * `CITATION_GENERATION_PROMPT`: Directs LLMs to ground responses strictly within context sources, enforcing `[Doc-X, p. Y]` reference formatting.
-  * `FAITHFULNESS_CHECK_PROMPT`: Instructs checking models to verify generated claims against source texts, returning a structured JSON faithfulness report.
-  * `SELF_CORRECTION_REWRITE_PROMPT`: Outlines contradiction lists and prompts corrective rewrites.
-
-#### `rag_engine/llm.py`
-* **Purpose**: Interfaces with LLM providers using the LiteLLM library.
-* **Details**:
-  * Manages the execution environment lifecycle.
-  * Downloads model files automatically from Hugging Face if missing local directories using `hf_api_key`.
-  * **Dynamic Provider Resolution**: Automatically inspects base URLs to register custom API formats (e.g. OpenAI compatibility for NVIDIA NIMs).
-  * **Ordered Cloud Fallback Traversal**: Iterates sequential providers during cloud timeout failures until a healthy endpoint completes successfully.
-
-#### `rag_engine/core.py`
-* **Purpose**: Manages document processing, semantic indexing, hybrid retrieval, and neural reranking.
-* **Details**:
-  * **Parsers**: Custom extraction logic for `.pdf` (using `pypdf`), `.html` (using `BeautifulSoup`), and general code/text.
-  * **Semantic Chunker**: Implements dynamic clustering based on statistical rolling differences in sentence embedding vectors.
-  * **Parent-Document Store**: Links short child nodes to their corresponding parent documents.
-  * **Hybrid Retriever**: Retrieves candidate matches from both BM25 indexes (sparse keyword matches) and cosine-similarity lookups (dense semantic vectors).
-  * **Reciprocal Rank Fusion (RRF)**: Merges rank arrays using sparse/dense multipliers (`rrf_weight_sparse` / `rrf_weight_dense`).
-  * **Sigmoid Logits Scaling**: Maps raw neural cross-encoder outputs (typically spanning `[-inf, inf]`) to normalized probability bounds `[0.0, 1.0]` to ensure score display readability on the UI.
-
-#### `rag_engine/guardrails.py`
-* **Purpose**: Performs real-time validation checks and self-correction loops.
-* **Details**:
-  * Parses citation formatting and checks them against retrieved document indices and page bounds.
-  * Calls faithfulness evaluators to check output claims against the context sources.
-  * Iteratively corrects and rewrites the answer up to `max_attempts` if failures occur.
-  * Strips citation markup brackets `[Doc-X, p. Y]` from the final response text before outputting.
+| Constant | Purpose |
+|---|---|
+| `HYDE_GENERATION_PROMPT` | Instructs the LLM to write a hypothetical document matching the query, used for HyDE query expansion |
+| `CITATION_GENERATION_PROMPT` | Directs the LLM to answer strictly from context with `[Doc-X, p. Y]` citations |
+| `FAITHFULNESS_CHECK_PROMPT` | Asks the LLM to evaluate each claim in the answer against the context, returning structured JSON |
+| `SELF_CORRECTION_REWRITE_PROMPT` | Provides contradiction details and asks the LLM to rewrite the answer faithfully |
+| `QUERY_ROUTER_PROMPT` | Classifies user input as `RAG_RETRIEVAL` or `DIRECT_LLM` using few-shot examples and JSON schema |
+| `DIRECT_LLM_SYSTEM_PROMPT` | Lightweight conversational system prompt for bypassed (non-RAG) responses |
 
 ---
 
-### 3. Application & Presentation Layer
-
-#### `ui_app.py`
-* **Purpose**: Exposes the visual dashboard for user interactions.
-* **Details**:
-  * Injects a custom CSS theme to set button styles, container borders, sidebar aesthetics, scrollbar paths, and avatar colors to Meta Blue (`#0064e0`).
-  * Locks inputs during query runtime to prevent concurrent submissions.
-  * Runs `st.status()` containers to stream real-time thought logs, displaying details about retrieval and self-correction iterations.
-
-#### `cli_app.py`
-* **Purpose**: Exposes a command-line REPL shell environment.
-* **Details**:
-  * Leverages Click/Typer packages to interpret interactive user queries.
-  * Handles `/ingest`, `/query`, and `/eval` commands, printing query results directly to the console.
-
-#### `api.py`
-* **Purpose**: Exposes a FastAPI endpoint service.
-* **Details**:
-  * Exposes POST interfaces `/ingest`, `/query` and GET interface `/eval` to support external API clients.
-
-#### `rag_engine/evaluation.py`
-* **Purpose**: Telemetry evaluation suite.
-* **Details**:
-  * Evaluates system telemetry files to compute faithfulness, relevance, precision, and recall metrics using RAGAS or math fallback routines.
+### `rag_engine/llm.py` — `LiteLLMClient`
+- Wraps the LiteLLM library for multi-provider completion/embedding/reranking
+- **Embedding**: Local `sentence-transformers/all-MiniLM-L6-v2` with automatic Hugging Face download; cloud fallback through the provider chain
+- **Completion**: Cloud path iterates `provider_order` from `llm_config.toml` (nvidia → gemini → openrouter → huggingface → deepseek → openai → anthropic); local path uses Ollama/vLLM endpoint
+- **Reranking**: Local `cross-encoder/ms-marco-MiniLM-L-6-v2` with Hugging Face auto-download
+- **Metrics**: Accepts optional `LLMMetricsCollector` and `purpose` string; logs token counts and timing at `DEBUG` level
+- All API keys read from lowercase environment variables (`hf_api_key`, `nvidia_api_key`, `gemini_api_key`, etc.)
 
 ---
 
-## Detailed Step-by-Step Query Execution Flow
+### `rag_engine/query_router.py` — `QueryRouter`
+- Intercepts every user query before it reaches the vector search
+- Calls `llm_client.acompletion()` with `QUERY_ROUTER_PROMPT` at `temperature=0.0`
+- Parses JSON response; on any parse failure defaults to `"RAG_RETRIEVAL"`
+- Returns `{"route": "RAG_RETRIEVAL" | "DIRECT_LLM", "reasoning": "..."}`
+- Logs every routing decision at INFO level
+- DIRECT_LLM queries bypass search, guardrails, and citation pipeline entirely — answered by a lightweight system prompt
+
+---
+
+### `rag_engine/core.py` — `RAGCoreEngine`
+- **Parsers**: `.pdf` via `pypdf` (page-level extraction); `.html` via `BeautifulSoup`; `.md`, `.txt`, `.py`, `.js` as plain text
+- **Semantic Chunker**: Splits at sentence boundaries where cosine distance between adjacent sentence embeddings exceeds `mean + k * std`
+- **Parent-Document Store**: Maps child chunk IDs to parent documents; persisted as `parent_store.json` in persist mode
+- **Hybrid Retriever**: BM25 sparse scores + dense cosine similarity → RRF fusion → cross-encoder reranking
+- **Vector Store Modes**:
+  - `"in-memory"`: All data lives in `self.child_nodes` (list of dicts) and `self.parent_store` (dict). BM25 rebuilt on every ingest. No persistence across restarts.
+  - `"persist"`: ChromaDB backend with `hnsw:space=cosine`. Data loaded into memory on startup. Ingestion writes to both ChromaDB and in-memory. SHA-256 ledger tracks file changes. Embedding model consistency verified on startup.
+- **Deduplication**: `_purge_file()` removes existing entries before re-ingesting. `deduplicate()` removes exact-text duplicates keyed by `(text, source, page_number)`, also cleans ChromaDB. `_init_persist()` auto-deduplicates during startup load.
+- **Dedicated methods**: `ingest_file()` (in-memory), `_ingest_file_persist()` (ChromaDB), `search()` (shared), `clean_database()`, `deduplicate()`
+
+---
+
+### `rag_engine/guardrails.py` — `GuardrailsManager`
+- **Citation Generation**: Prompts the LLM to produce answers with `[Doc-X, p. Y]` inline citations, grounded strictly in the retrieved context
+- **Citation Validation**: Parses all `[Doc-X]` and `[Doc-X, p. Y]` references from the answer, validates indices against the context list, and checks page number bounds
+- **Faithfulness Check**: Sends the answer + context to the LLM with `FAITHFULNESS_CHECK_PROMPT`, receives a JSON report enumerating each claim and whether it is supported. Detects contradictions and hallucinations.
+- **Self-Correction Loop**: If faithfulness fails, rewrites the answer using `SELF_CORRECTION_REWRITE_PROMPT`, then re-validates. Repeats up to `max_attempts` (default 3).
+- **LLM Metrics Collection**: Creates an `LLMMetricsCollector` at the start of each query, threads it through every `acompletion()` call, and returns `llm_metrics` in the result dict.
+- **Citation Map**: `build_citation_map(answer, contexts)` parses all citation references from the final answer and maps each `[Doc-X, p. Y]` to the corresponding source filename, page, and score. Exposed via `__init__.py`.
+
+---
+
+### `rag_engine/evaluation.py` — `RagasEvaluator`
+- Reads query telemetry from `logs/query_log.jsonl`
+- Uses synchronous `SyncRagasEmbeddings` wrapper (avoids uvloop thread-pool deadlock with Streamlit)
+- Calls `await aevaluate()` directly (not `evaluate()`) to avoid nested event loop issues
+- Computes: `faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`
+- Pads missing metrics with `None` when `ground_truth` metadata is absent
+- Returns `{"evaluation_type": "ragas", ...}` on success, `{"status": "..."}` on fallback
+
+---
+
+### `rag_engine/metrics.py` — `LLMMetricsCollector`
+- Dataclass `LLMCallMetrics`: purpose, elapsed_ms, prompt_tokens, completion_tokens, total_tokens
+- Collector class accumulates per-call data, exposes `to_dict()` (JSON-serializable) and `format_per_call_breakdown()` (human-readable string)
+- Used by `guardrails.py` to instrument every LLM call during answer generation
+- Displayed in CLI (colored table), Streamlit UI (metric cards + expander), and API JSON response
+
+---
+
+### `rag_engine/memory.py` — `ConversationMemory`
+- Sliding window of recent conversation turns
+- `window_size` (default 5) controls how many user/assistant pairs are retained
+- `format_history()` renders the message list as a formatted string for inclusion in LLM prompts
+- Passed into `guardrails.generate_faithful_answer()` via `chat_history` parameter
+
+---
+
+### `rag_engine/vector_store.py` — `VectorStore`
+- ChromaDB wrapper with `PersistentClient` and `hnsw:space=cosine` configuration
+- **Collection Lifecycle**: `initialize()`, `delete_all()`, `create_new_collection()`, `drop_collection()`, `swap_collection()`
+- **Ingestion Ledger**: `chroma_ingestion_logger.json` tracks per-file SHA-256 hash, modification time, and chunk IDs — enables incremental updates
+- **Embedding Model Tracking**: Stored in collection metadata, verified on startup to detect model changes
+- **Chunk Operations**: `add_chunks()`, `add_chunks_batch()`, `delete_document()`, `get_all_chunks()`, `get_all_texts()`
+- **Parent Store**: JSON serialization/deserialization of parent documents to disk
+
+---
+
+### `rag_engine/ingestion.py` — `IngestionCoordinator`
+- Directory scanner with extension filtering (`.pdf`, `.html`, `.htm`, `.md`, `.markdown`, `.txt`, `.py`, `.js`)
+- Incremental update detection: compares current SHA-256 against ledger entry
+- `ingest_path()` — single file or directory entry point
+- `full_reindex()` — creates new ChromaDB collection, reprocesses all files, atomically swaps collections
+- `verify_model_consistency()` — checks that the persisted collection matches the configured embedding model
+- Files are processed through `core_engine.parse_file()` → `core_engine.chunk_semantically()` → `llm_client.aembedding()` → `vector_store.add_chunks_batch()`
+
+---
+
+### `rag_engine/utils/logger.py` — `QueryLogger`
+- Async JSONL logger appends query records to `logs/query_log.jsonl`
+- Each record contains: query, response, retrieved nodes, latency, metadata
+- Consumed by `RagasEvaluator` for offline evaluation
+
+---
+
+## Application Entry Points
+
+### `cli_app.py` — CLI
+- Initializes all components at module level (`LiteLLMClient`, `RAGCoreEngine`, `GuardrailsManager`, `QueryRouter`, `QueryLogger`, `ConversationMemory`)
+- `query_callback()`: Routes query → if DIRECT_LLM calls LLM directly → if RAG_RETRIEVAL runs search + guardrails → streams answer → yields citation map, source listing, and metrics
+- `ingest_callback()`: Walks directory or single file, calls `core_engine.ingest_file()`
+- `model_callback()`: Switches the active model
+- Accepts `--ingest-path` for pre-ingestion on startup
+- Runs `REPLManager.start_interactive_loop()` for interactive `/command` processing
+
+### `ui_app.py` — Streamlit
+- Custom Meta Blue CSS theme injected at startup
+- Sidebar: file browser, ingestion button, dedup button, clean DB button (with confirmation popover), RAGAS evaluation button, database stats display
+- Pending query flow: Route query → if DIRECT_LLM calls LLM directly and renders → if RAG_RETRIEVAL runs search in `st.status()` card → guardrails → render answer + citation map + sources + metrics
+- State managed via `st.session_state` (chat history, memory, generating flag)
+
+### `api.py` — FastAPI
+- `/ingest` POST: accepts `{"path": "..."}`, calls `core_engine.ingest_file()`, returns doc_id + duration
+- `/query` POST: accepts `QueryRequest` (query, model, top_n, use_hyde, history), routes query → if DIRECT_LLM returns early → if RAG_RETRIEVAL runs search + guardrails, returns answer + retrieved_nodes + citation_map + llm_metrics
+- `/eval` GET: runs `RagasEvaluator.evaluate_ragas()`, returns metrics dict
+
+---
+
+## Step-by-Step Query Execution Flow
 
 ```
- User Input
-     │
-     ▼
- ui_app.py  ──►  Disable Chat Input (Blocks Double-Submit)
-     │
-     ▼
- rag_engine/core.py (RAGCoreEngine.search)
-     │
-     ├───► [If use_hyde=true]  ──►  Call LLM for Hypothetical Answer  ──► Embed Answer
-     │                                                                       │
-     └───► [If use_hyde=false] ──────────────────────────────────────────────┼──► Embed Query
-                                                                             │
-     ┌───────────────────────────────────────────────────────────────────────┘
-     ▼
- ┌───┴────────────────────────────────────────┐
- │ 1. Sparse Retrieve: BM25 score query      │
- │ 2. Dense Retrieve: Cosine similarity score │
- └───┬────────────────────────────────────────┘
-     │
-     ▼
- Reciprocal Rank Fusion (RRF)
-     │   Multiply Sparse/Dense ranks by configurable rrf_weight keys.
-     ▼
- Retrieve Top-N Child Nodes ──► Map to Parent Document Contexts
-     │
-     ▼
- Cross-Encoder Reranking
-     │   Score chunks using local cross-encoder model.
-     ├───► Scale Reranker Logits to [0.0 - 1.0] range using Sigmoid.
-     ▼
- rag_engine/guardrails.py (GuardrailsManager.generate_faithful_answer)
-     │
-     ├───► Step A: Generate initial response from LLM containing citations ([Doc-X, p. Y])
-     │
-     ▼
-  Iterative Validation Loop (Runs up to `max_attempts`):
-     │
-     ├───► Step B: Parse and validate citations format and boundaries.
-     ├───► Step C: Query LLM faithfulness check (JSON output matching claims).
-     │
-     ├─► [PASS] ─► Strip citation brackets ─► Return Clean Response ─► Enable Input
-     │
-     └─► [FAIL] ─► Self-Correct / Rewrite response based on contradiction report ─► Retry Loop
+User Input
+    │
+    ▼
+1. QUERY ROUTING (QueryRouter.route_query)
+   │   temperature=0.0, max_tokens=128
+   │
+   ├──► DIRECT_LLM
+   │     │  Call LLM with lightweight system prompt
+   │     │  Return answer directly (no search, no guardrails)
+   │     ▼
+   │   Output: conversational response, no citations
+   │
+   └──► RAG_RETRIEVAL  ──►  continue to step 2
+   
+   2. HYBRID SEARCH (RAGCoreEngine.search)
+   │
+   ├───► [If use_hyde=true]  ──►  LLM generates hypothetical document  ──►  Embed document
+   │                                                                          │
+   └───► [If use_hyde=false] ─────────────────────────────────────────────────┼──► Embed query
+                                                                               │
+   ┌──────────────────────────────────────────────────────────────────────────┘
+   ▼
+   ├───► 2a. Sparse Retrieve: BM25 keyword scores
+   ├───► 2b. Dense Retrieve: Cosine similarity against all chunk embeddings
+   │
+   ▼
+   3. RRF FUSION
+   │   Combine sparse and dense rank arrays
+   │   score = rrf_weight_sparse / (rrf_k + rank_sparse)
+   │         + rrf_weight_dense  / (rrf_k + rank_dense)
+   ▼
+   4. TOP-N SELECTION
+   │   Select highest-scoring child nodes
+   ▼
+   5. CROSS-ENCODER RERANKING
+   │   Neural reranker re-scores candidates
+   │   Scale logits to [0.0, 1.0] via sigmoid
+   ▼
+   6. GUARDRAILS PIPELINE (GuardrailsManager.generate_faithful_answer)
+   │
+   ├───► 6a. Generate initial answer with CITATION_GENERATION_PROMPT
+   │        Every claim grounded with [Doc-X, p. Y]
+   │
+   ▼
+   7. ITERATIVE VALIDATION LOOP (up to max_attempts)
+   │
+   ├───► 7a. Parse and validate all [Doc-X, p. Y] citations
+   │         - Doc index within bounds
+   │         - Page number matches source
+   │
+   ├───► 7b. Faithfulness check via FAITHFULNESS_CHECK_PROMPT
+   │         JSON output: per-claim supported/contradiction flags
+   │
+   ├───► [PASS] ─► Continue to step 8
+   │
+   └───► [FAIL] ─► Rewrite via SELF_CORRECTION_REWRITE_PROMPT
+                   └──► Retry from step 7a
+   
+   8. OUTPUT CONSTRUCTION
+   │
+   ├───► Answer with preserved [Doc-X, p. Y] citations
+   ├───► Citation map: { "[Doc-0, p. 5]": {"filename": "...", "page": 5, "score": 0.9} }
+   ├───► Source listing with filenames, pages, scores
+   ├───► LLM Metrics: per-call breakdown (purpose, tokens, elapsed)
+   └───► Logged to telemetry + stdout
 ```
 
 ---
 
-## 4. Telemetry & Evaluation
+## Prompt Flow Summary
 
-### OpenSmith Telemetry
-OpenSmith telemetry captures performance metrics, inputs, and outputs across key operations. 
-To launch the OpenSmith Tracing UI locally, run:
-```bash
-opensmith --port 7824
 ```
-Access the dashboard at [http://127.0.0.1:7824](http://127.0.0.1:7824).
+QUERY_ROUTER_PROMPT ──► (classifies input)
+                           │
+                           ▼ (if RAG_RETRIEVAL)
+CITATION_GENERATION_PROMPT ──► (generates answer with citations)
+                                    │
+                                    ▼
+FAITHFULNESS_CHECK_PROMPT ──► (evaluates claims against context)
+                                    │
+                            ┌───────┴───────┐
+                            ▼               ▼
+                          PASS            FAIL
+                            │               │
+                            │     SELF_CORRECTION_REWRITE_PROMPT
+                            │       (rewrite, then re-check)
+                            ▼               │
+                      Return answer   ──────┘ (up to max_attempts)
+```
 
-Once the service is running, any queries run via the CLI, Streamlit UI, or API endpoints will automatically generate trace nodes under tags like `core_engine`, `guardrails`, and `llm_client`.
+---
 
-### Ragas Evaluation
-Ragas evaluation allows offline validation of RAG pipeline quality using core metrics: Faithfulness, Answer Relevancy, Context Precision, and Context Recall.
+## Vector Store Modes
 
-#### Execution Steps:
-1. Ensure you have run some queries through the application so that telemetry/query logs are generated in `logs/query_log.jsonl`.
-2. Start the API server:
-   ```bash
-   uv run uvicorn api:app --reload --port 8000
-   ```
-3. Trigger the evaluation endpoint:
-   ```bash
-   curl http://127.0.0.1:8000/eval
-   ```
-   Alternatively, run the evaluation asynchronously in your scripts by instantiating the `RagasEvaluator` class:
-   ```python
-   from rag_engine.evaluation import RagasEvaluator
-   evaluator = RagasEvaluator()
-   scores = await evaluator.evaluate_ragas()
-   print("Ragas Scores:", scores)
-   ```
+### In-Memory (default)
+- `[vector_store].mode = "in-memory"` in `rag_config.toml`
+- All chunks stored in `RAGCoreEngine.child_nodes` (Python list of dicts)
+- BM25 index rebuilt on every ingest
+- No data persistence across restarts
+- Suitable for development, testing, and small document sets
+
+### Persist (ChromaDB)
+- `[vector_store].mode = "persist"` in `rag_config.toml`
+- Chunks stored in ChromaDB with `hnsw:space=cosine` index
+- SHA-256 ingestion ledger tracks file changes for incremental updates
+- Data survives restarts — loaded into memory on startup
+- Dedup runs automatically on startup to clean any stale duplicates
+- `IngestionCoordinator` handles incremental scans and full reindex with atomic collection swap
+- Switching modes mid-session is not supported (data not migrated)
+
+---
+
+## Telemetry & Evaluation
+
+### Query Logging
+Every query is logged asynchronously to `logs/query_log.jsonl` with:
+- Query text and response
+- Retrieved context chunks (text, filename, page, score)
+- Latency and metadata
+- Routing decision and faithfulness status
+
+### RAGAS Offline Evaluation
+1. Ensure queries have been run (logs populate `logs/query_log.jsonl`)
+2. Trigger evaluation via API: `GET /eval` or
+3. Call `RagasEvaluator().evaluate_ragas()` programmatically
+4. Metrics returned: `faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`
+5. `context_precision` and `context_recall` require `ground_truth` metadata in log entries
+
+---
+
+## Configuration Reference
+
+### Environment Variables
+All API keys are lowercase:
+```
+hf_api_key, nvidia_api_key, gemini_api_key, openai_api_key,
+anthropic_api_key, deepseek_api_key, openrouter_api_key
+```
+
+### Key Configuration Defaults
+| Parameter | Default | Description |
+|---|---|---|
+| `chunking.max_chunk_size` | 1500 | Maximum characters per chunk |
+| `chunking.k` | 1.0 | Semantic threshold multiplier (std devs) |
+| `retrieval.top_n` | 3 | Number of chunks to retrieve |
+| `retrieval.rrf_k` | 60 | RRF penalty constant |
+| `retrieval.use_hyde` | false | Hypothetical Document Embedding toggle |
+| `generation.temperature` | 0.0 | LLM temperature |
+| `generation.max_tokens` | 512 | Max tokens in generated answer |
+| `guardrails.max_attempts` | 3 | Self-correction loop limit |
+| `vector_store.mode` | in-memory | Vector store backend |
+| `logging.level` | INFO | Log verbosity |

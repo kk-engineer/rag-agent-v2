@@ -10,12 +10,14 @@ class REPLManager:
         self,
         query_callback: Callable[[str], Any],
         model_selection_callback: Optional[Callable[[str], None]] = None,
-        ingest_callback: Optional[Callable[[str], Any]] = None
+        ingest_callback: Optional[Callable[[str], Any]] = None,
+        core_engine: Any = None,
     ):
 
         self.query_callback = query_callback
         self.model_selection_callback = model_selection_callback
         self.ingest_callback = ingest_callback
+        self.core_engine = core_engine
         self.current_model = "local-llm"
 
 
@@ -25,6 +27,8 @@ class REPLManager:
         click.echo("/help          - Show this help menu")
         click.echo("/model <name>  - Switch target LLM model (e.g. local-llm, openai-llm, anthropic-llm)")
         click.echo("/ingest <path> - Ingest a file or directory of documents")
+        click.echo("/dedup         - Remove duplicate chunks from the vector store")
+        click.echo("/clean-db      - Wipe the entire vector store (all chunks and parents)")
         click.echo("/clear         - Clear terminal screen")
         click.echo("/exit          - Quit the application\n")
 
@@ -117,7 +121,48 @@ class REPLManager:
                         else:
 
                             click.secho("Usage: /ingest <file_or_dir_path>", fg="red")
-                            
+
+                    elif cmd == "/dedup":
+
+                        if not self.core_engine:
+
+                            click.secho("Deduplication is not available in this context.", fg="red")
+                        else:
+
+                            click.secho("Deduplicating chunks...", fg="cyan")
+                            result = self.core_engine.deduplicate()
+                            click.secho(
+                                f"Removed {result['removed']} duplicate chunks. "
+                                f"{result['remaining']} chunks remaining.",
+                                fg="green",
+                            )
+
+                    elif cmd == "/clean-db":
+
+                        if not self.core_engine:
+
+                            click.secho("Database management is not available in this context.", fg="red")
+                        else:
+
+                            click.secho(
+                                "⚠️  WARNING: This will permanently delete all ingested documents!",
+                                fg="red",
+                                bold=True,
+                            )
+                            loop = asyncio.get_running_loop()
+                            confirm = await loop.run_in_executor(
+                                None,
+                                lambda: click.confirm("Are you sure you want to clean the database?", default=False),
+                            )
+                            if confirm:
+                                result = self.core_engine.clean_database()
+                                click.secho(
+                                    f"Database wiped: {result['cleared']} chunks removed.",
+                                    fg="green",
+                                )
+                            else:
+                                click.secho("Cancelled.", fg="yellow")
+
                     else:
 
                         click.secho(f"Unknown command: {cmd}", fg="red")

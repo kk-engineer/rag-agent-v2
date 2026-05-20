@@ -40,7 +40,8 @@ import streamlit as st
 import asyncio
 import time
 import logging
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ConversationMemory
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ConversationMemory, QueryRouter
+from rag_engine.prompts import DIRECT_LLM_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 from rag_engine.ui import (
@@ -165,6 +166,7 @@ if "llm_client" not in st.session_state:
     st.session_state.core_engine = RAGCoreEngine(st.session_state.llm_client)
     st.session_state.guardrails = GuardrailsManager(st.session_state.llm_client)
     st.session_state.query_logger = QueryLogger()
+    st.session_state.query_router = QueryRouter(st.session_state.llm_client)
     st.session_state.chat_history = []
     st.session_state.ingested_files = []
     st.session_state.generating = False
@@ -317,6 +319,40 @@ with st.sidebar:
 
             st.caption(f)
 
+    # Database stats
+    core = st.session_state.core_engine
+    chunk_count = len(core.child_nodes)
+    doc_count = len(core.parent_store)
+    if chunk_count > 0:
+        st.write("---")
+        st.subheader("Database Stats")
+        st.caption(f"**{chunk_count}** chunks from **{doc_count}** documents")
+        st.caption(f"Mode: **{core.vs_mode}**")
+
+    st.write("---")
+    st.subheader("Database Maintenance")
+
+    if st.button("🧹 Deduplicate Chunks"):
+        with st.spinner("Deduplicating..."):
+            result = core.deduplicate()
+        if result["removed"] > 0:
+            st.success(f"Removed {result['removed']} duplicate chunks. {result['remaining']} remaining.")
+        else:
+            st.info(f"No duplicates found. {result['remaining']} chunks are unique.")
+        st.rerun()
+
+    with st.popover("🗑️ Clean Database", use_container_width=True):
+        st.warning("This will **permanently delete all ingested documents** and the vector store.")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Confirm Clean", type="primary"):
+                with st.spinner("Cleaning database..."):
+                    result = core.clean_database()
+                st.success(f"Database wiped: {result['cleared']} chunks removed.")
+                st.rerun()
+        with col2:
+            st.button("Cancel")
+
     st.write("---")
     st.subheader("Evaluation Suite")
     if st.button("Run Offline Evaluation"):
@@ -375,6 +411,44 @@ if st.session_state.generating and st.session_state.pending_query:
 
     # Start measuring latency
     start_time = time.time()
+
+    # Route the query
+    route_result = run_async(st.session_state.query_router.route_query(user_query))
+
+    if route_result["route"] == "DIRECT_LLM":
+
+        messages = [
+            {"role": "system", "content": DIRECT_LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": user_query},
+        ]
+        response = run_async(
+            st.session_state.llm_client.acompletion(messages, temperature=0.7)
+        )
+        answer = response.choices[0].message.content
+
+        latency_total = (time.time() - start_time) * 1000
+        run_async(st.session_state.query_logger.log_query(
+            query=user_query,
+            response=answer,
+            retrieved_nodes=[],
+            latency_ms=latency_total,
+            metadata={"routing": "direct_llm"}
+        ))
+        logger.info(f"[RAG Metrics] Route: DIRECT_LLM, Latency: {latency_total:.1f}ms")
+
+        with st.chat_message("assistant", avatar="✨"):
+            async def direct_stream():
+                for i in range(0, len(answer), 5):
+                    yield answer[i:i+5]
+                    await asyncio.sleep(0.01)
+            final_answer = render_streaming_response(direct_stream())
+            st.caption("💬 Direct LLM response (no document search)")
+
+        st.session_state.chat_history.append({"role": "assistant", "content": final_answer})
+        st.session_state.memory.add_turn(user_query, final_answer)
+        st.session_state.pending_query = None
+        st.session_state.generating = False
+        st.rerun()
 
     # Create status card for the Agent's thought process
     with st.status("Agent is thinking...", expanded=True) as status_box:

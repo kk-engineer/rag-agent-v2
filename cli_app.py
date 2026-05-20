@@ -4,7 +4,8 @@ import asyncio
 import click
 import logging
 import sys
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory, configure_logging
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory, configure_logging, build_citation_map, QueryRouter
+from rag_engine.prompts import DIRECT_LLM_SYSTEM_PROMPT
 from rag_engine.cli import REPLManager
 
 
@@ -35,13 +36,47 @@ llm_client = LiteLLMClient()
 core_engine = RAGCoreEngine(llm_client)
 guardrails = GuardrailsManager(llm_client)
 query_logger = QueryLogger()
+query_router = QueryRouter(llm_client)
 selected_model = "local-llm"
 
 
 async def query_callback(query: str):
 
     start_time = time.time()
-    
+
+    # 0. Route the query
+    route_result = await query_router.route_query(query)
+
+    if route_result["route"] == "DIRECT_LLM":
+
+        messages = [
+            {"role": "system", "content": DIRECT_LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ]
+        response = await llm_client.acompletion(messages, temperature=0.7)
+        answer = response.choices[0].message.content
+        memory.add_turn(query, answer)
+
+        latency = (time.time() - start_time) * 1000
+        await query_logger.log_query(
+            query=query,
+            response=answer,
+            retrieved_nodes=[],
+            latency_ms=latency,
+            metadata={"model": selected_model, "routing": "direct_llm"}
+        )
+
+        chunk_size = 5
+        for i in range(0, len(answer), chunk_size):
+            yield answer[i:i + chunk_size]
+            await asyncio.sleep(0.01)
+
+        yield (
+            f"\n\n\033[33m💬 Direct LLM response (no document search)"
+            f" — Latency: {latency:.1f} ms\033[0m"
+        )
+        return
+
     # 1. Search core engine
     start_retrieve = time.time()
     contexts = await core_engine.search(query, use_hyde=False)
@@ -74,7 +109,25 @@ async def query_callback(query: str):
         yield answer[i:i+chunk_size]
         await asyncio.sleep(0.01)
 
-    # 5. Format and yield metrics block at the end of stream
+    # 5. Yield citation map (sources actually cited in the answer)
+    citation_map = build_citation_map(answer, contexts)
+    if citation_map:
+        cited_str = "\n\n\033[33m📖 Cited Sources:\033[0m\n"
+        for ref, info in citation_map.items():
+            cited_str += f"  {ref} → {info['filename']} (p. {info['page']})\n"
+        yield cited_str
+
+    # 6. Yield source references mapping
+    if contexts:
+        sources_str = "\n\n📚 Sources:\n"
+        for idx, ctx in enumerate(contexts):
+            sources_str += (
+                f"  \033[1m[{idx}]\033[0m {ctx.get('filename')} "
+                f"(p. {ctx.get('page_number')}) - Score: {ctx.get('score', 0.0):.4f}\n"
+            )
+        yield sources_str
+
+    # 7. Format and yield metrics block at the end of stream
     num_docs = len(contexts)
     scores = [c.get("score", 0.0) for c in contexts]
     top_score = max(scores) if scores else 0.0
@@ -182,7 +235,8 @@ def main(ingest_path):
     repl = REPLManager(
         query_callback=query_callback,
         model_selection_callback=model_callback,
-        ingest_callback=ingest_callback
+        ingest_callback=ingest_callback,
+        core_engine=core_engine,
     )
     
     try:

@@ -63,6 +63,30 @@ def strip_citations(text: str) -> str:
     return re.sub(r"\s*\[Doc-\d+(?:,\s*p\.\s*\d+)?\]", "", text)
 
 
+def build_citation_map(answer: str, contexts: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Parse [Doc-X, p. Y] references from answer and map to source filenames."""
+    import re
+    citation_map: Dict[str, Dict[str, Any]] = {}
+    if not answer or not contexts:
+        return citation_map
+
+    refs = re.findall(r"\[Doc-(\d+)(?:,\s*p\.\s*(\d+))?\]", answer)
+    for doc_id_str, page_str in refs:
+        doc_id = int(doc_id_str)
+        if doc_id < len(contexts):
+            ctx = contexts[doc_id]
+            key = f"[Doc-{doc_id_str}"
+            if page_str:
+                key += f", p. {page_str}"
+            key += "]"
+            citation_map[key] = {
+                "filename": ctx.get("filename", "Unknown"),
+                "page": int(page_str) if page_str else ctx.get("page_number"),
+                "score": ctx.get("score", 0.0),
+            }
+    return citation_map
+
+
 class GuardrailsManager:
 
     def __init__(self, llm_client: LiteLLMClient, config_path: str = "config/rag_config.toml"):
@@ -223,7 +247,7 @@ class GuardrailsManager:
 
                 on_thought(f"⏱️ Fallback answer formulation completed. Time taken: {fallback_duration:.3f}s")
             return {
-                "answer": strip_citations(response.choices[0].message.content),
+                "answer": response.choices[0].message.content,
                 "faithful": True,
                 "attempts": 1,
                 "invalid_citations": [],
@@ -292,7 +316,7 @@ class GuardrailsManager:
                 total_gen_duration = time.time() - total_gen_start
                 logger.info(f"Successfully generated faithful answer in {total_gen_duration:.3f}s (Attempts: {attempt + 1})")
                 return {
-                    "answer": strip_citations(answer),
+                    "answer": answer,
                     "faithful": True,
                     "attempts": attempt + 1,
                     "invalid_citations": [],
@@ -362,7 +386,7 @@ class GuardrailsManager:
 
             on_thought(f"⚠️ Verification failed after {max_attempts} attempts. Total verification time: {total_gen_duration:.3f}s")
         return {
-            "answer": strip_citations(answer),
+            "answer": answer,
             "faithful": False,
             "attempts": max_attempts,
             "invalid_citations": invalid_citations,
