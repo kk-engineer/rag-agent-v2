@@ -5,7 +5,7 @@
 [memory]
 # context_window: Maximum number of recent conversation turns (user+assistant) to retain
 # and inject as context for the next LLM generation. Set to 0 to disable conversational memory.
-context_window = 5
+context_window = 2
 
 [chunking]
 # max_chunk_size: Maximum character count allowed for a single semantic text chunk.
@@ -22,10 +22,14 @@ max_chunk_size = 1500
 k = 1.0
 
 [retrieval]
-# top_n: Number of final document nodes to return after all retrieval and reranking steps.
-# Acceptable values: positive integers (typically 3 to 10).
-# Increasing top_n provides more context to the LLM but increases API tokens and latency.
-top_n = 5
+# top_k_retrieval: Number of candidate chunks fed into the reranker after RRF fusion.
+# Larger values give the reranker more to choose from but increase cost.
+# Production Cloud sweet spot: 50–100 | Local sweet spot: 20–35
+top_k_retrieval = 20
+
+# top_k_llm: Number of top-ranked chunks from the reranker passed to the LLM as context.
+# Universal sweet spot: 3–7
+top_k_llm = 3
 
 # use_hyde: Enables/disables Hypothetical Document Embeddings (HyDE) expansion.
 # Acceptable values: boolean (true or false).
@@ -89,7 +93,7 @@ collection_name = "rag_documents"
 [logging]
 # level: Logging verbosity level. Acceptable values: "DEBUG", "INFO", "WARNING", "ERROR".
 # Set to "DEBUG" to print all LLM prompts, responses, and timing to the console.
-level = "DEBUG"
+level = "INFO"
 
 [models]
 # embedder_repo_id: Hugging Face repository ID for local fallback embedding model.

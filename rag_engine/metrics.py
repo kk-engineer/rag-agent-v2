@@ -88,6 +88,6 @@ class LLMMetricsCollector:
         for c in self.calls:
             sec = c.elapsed_ms / 1000
             parts.append(
-                f"{c.purpose}({sec:.1f}s, {c.prompt_tokens}+{c.completion_tokens})"
+                f"{c.purpose}({sec:.1f}s, {c.total_tokens} tks)"
             )
         return ", ".join(parts)

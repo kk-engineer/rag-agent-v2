@@ -281,7 +281,7 @@ class LiteLLMClient:
 
             start_time = time.time()
             _display_model = target_model.split("/", 1)[-1] if "/" in target_model else target_model
-            logger.debug(f"--- LLM PROMPT [{_display_model}] ---\n{json.dumps(messages, indent=2)}\n----------------------------")
+            logger.debug(f"--- LLM PROMPT [{_display_model}] ({metrics_purpose}) ---\n{json.dumps(messages, indent=2)}\n----------------------------")
 
             # Router acompletion
             response = await self.router.acompletion(
@@ -297,7 +297,7 @@ class LiteLLMClient:
             usage = getattr(response, "usage", None)
             content = response.choices[0].message.content if response.choices else "N/A"
             logger.debug(
-                f"--- LLM RESPONSE [{_display_model}] ---\n{content}\n"
+                f"--- LLM RESPONSE [{_display_model}] ({metrics_purpose}) ---\n{content}\n"
                 f"----------------------------------\n"
                 f"tokens: in={usage.prompt_tokens if usage else '?'} "
                 f"out={usage.completion_tokens if usage else '?'} "
@@ -317,6 +317,7 @@ class LiteLLMClient:
             raise e
 
 
+    @trace(tags=["llm_client", "cloud_completion"])
     async def _completion_cloud_fallback(
         self,
         messages: List[Dict[str, str]],
@@ -421,7 +422,7 @@ class LiteLLMClient:
             try:
 
                 cf_start = time.time()
-                logger.debug(f"--- LLM PROMPT [{provider} / {model}] ---\n{json.dumps(litellm_kwargs.get('messages', messages), indent=2)}\n----------------------------")
+                logger.debug(f"--- LLM PROMPT [{provider} / {model}] ({metrics_purpose}) ---\n{json.dumps(litellm_kwargs.get('messages', messages), indent=2)}\n----------------------------")
 
                 response = await asyncio.wait_for(
                     litellm.acompletion(**litellm_kwargs),
@@ -432,7 +433,7 @@ class LiteLLMClient:
                 cf_usage = getattr(response, "usage", None)
                 cf_content = response.choices[0].message.content if response.choices else "N/A"
                 logger.debug(
-                    f"--- LLM RESPONSE [{provider} / {model}] ---\n{cf_content}\n"
+                    f"--- LLM RESPONSE [{provider} / {model}] ({metrics_purpose}) ---\n{cf_content}\n"
                     f"----------------------------------\n"
                     f"tokens: in={cf_usage.prompt_tokens if cf_usage else '?'} "
                     f"out={cf_usage.completion_tokens if cf_usage else '?'} "
@@ -460,6 +461,7 @@ class LiteLLMClient:
 
 
 
+    @trace(tags=["llm_client", "cloud_embedding"])
     async def _embedding_cloud_fallback(
         self,
         texts: List[str]

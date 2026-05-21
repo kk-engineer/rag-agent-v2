@@ -13,25 +13,18 @@ def test_validate_citations():
         {"text": "RAG helps ground LLMs.", "page_number": 3}
     ]
     
-    # Test valid citations format
-    response_valid = "Python is standard [Doc-0, p. 1] and RAG is awesome [Doc-1, p. 3]."
+    # Test valid citations format (N numeric tokens, 1-based)
+    response_valid = "Python is standard [1] and RAG is awesome [2]."
     is_ok, errs = guardrails.validate_citations(response_valid, contexts)
     assert is_ok
     assert len(errs) == 0
     
-    # Test invalid index
-    response_invalid_idx = "Python is standard [Doc-2, p. 1]"
+    # Test invalid index (3 > len=2)
+    response_invalid_idx = "Python is standard [3]"
     is_ok, errs = guardrails.validate_citations(response_invalid_idx, contexts)
     assert not is_ok
     assert len(errs) == 1
     assert "range" in errs[0]["reason"]
-    
-    # Test page mismatch
-    response_invalid_page = "Python is standard [Doc-0, p. 2]"
-    is_ok, errs = guardrails.validate_citations(response_invalid_page, contexts)
-    assert not is_ok
-    assert len(errs) == 1
-    assert "Page number" in errs[0]["reason"]
 
 
 @pytest.mark.asyncio
@@ -56,13 +49,13 @@ async def test_guardrails_self_correction_loop(monkeypatch):
         
         if completion_calls == 1:
 
-            mock_choice.message.content = "Initial answer [Doc-0, p. 1]"
+            mock_choice.message.content = "Initial answer [1]"
         elif completion_calls == 2:
 
             mock_choice.message.content = '{"faithful": false, "claims": [{"claim": "fact", "supported": false}]}'
         elif completion_calls == 3:
 
-            mock_choice.message.content = "Corrected answer [Doc-0, p. 1]"
+            mock_choice.message.content = "Corrected answer [1]"
         else:
 
             mock_choice.message.content = '{"faithful": true, "claims": []}'
@@ -103,13 +96,13 @@ def test_strip_citations():
 
     from rag_engine.guardrails import strip_citations
     
-    text = "Python is standard [Doc-0, p. 1] and RAG is awesome [Doc-1, p. 3]."
+    text = "Python is standard [1] and RAG is awesome [2]."
     assert strip_citations(text) == "Python is standard and RAG is awesome."
     
-    text_simple = "Another sentence [Doc-2]."
+    text_simple = "Another sentence [1]."
     assert strip_citations(text_simple) == "Another sentence."
     
-    text_no_space = "Text[Doc-3]"
+    text_no_space = "Text[1]"
     assert strip_citations(text_no_space) == "Text"
     
     assert strip_citations("") == ""

@@ -117,7 +117,7 @@ rrf_k = 42
         ]
     monkeypatch.setattr(llm_client, "rerank", mock_rerank)
 
-    results = await engine.search("dummy query", top_n=1)
+    results = await engine.search("dummy query", top_k_retrieval=1, top_k_llm=1)
     assert len(results) == 1
     score = results[0]["score"]
     assert 0.19 <= score <= 0.20

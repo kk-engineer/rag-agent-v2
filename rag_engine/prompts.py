@@ -5,7 +5,11 @@ HYDE_GENERATION_PROMPT = """Given the query: '{query}', write a detailed, hypoth
 Write a hypothetical document below."""
 
 
-CITATION_GENERATION_PROMPT = """System: You are an expert RAG generator. Answer the user query based ONLY on the provided context nodes. Ground every single claim you make with precise inline citations in the format `[Doc-X, p. Y]`, where X is the 0-based document index and Y is the page number. If the document does not specify a page, use `[Doc-X, p. 1]`. Never make claims that are not fully supported by the context.
+CITATION_GENERATION_PROMPT = """System: You are an expert assistant analyzing uploaded source material.
+Answer the user query using ONLY the provided context blocks delimited by "--- Document [N] ---".
+You MUST cite your sources inline using their respective bracketed numbers, exactly like this: [1] or [2].
+If multiple sources support a claim, combine them like this: [1][3].
+Do not output any raw database hashes, file names, or trailing bibliographies. Keep citations strictly inline as numeric tokens.
 
 {chat_history}
 Context:
@@ -13,7 +17,7 @@ Context:
 
 Query: {query}
 
-Write your answer below with [Doc-X, p. Y] citations."""
+Write your answer below with numeric citation tokens."""
 
 
 FAITHFULNESS_CHECK_PROMPT = """System: You are an independent RAG faithfulness evaluator. Your task is to analyze the generated answer against the retrieved context nodes. Break down the answer into individual claims, check if each claim is fully supported (entailed) by the context, and output a JSON response.
@@ -42,7 +46,7 @@ Respond with valid JSON below."""
 
 
 SELF_CORRECTION_REWRITE_PROMPT = """System: You are an expert RAG self-correction engine. The previous generated answer has failed a faithfulness validation check because it contains claims not supported by the context.
-Rewrite the answer so that it is 100% faithful to the context. Remove or correct any claims flagged as unsupported. Do not introduce new unsupported claims. Ground every claim with inline citations in the format `[Doc-X, p. Y]`.
+Rewrite the answer so that it is 100% faithful to the context. Remove or correct any claims flagged as unsupported. Do not introduce new unsupported claims. Ground every claim with inline numeric citation tokens like [1] or [2].
 
 Context:
 {context}
@@ -58,7 +62,9 @@ Previous Answer:
 Write the corrected answer below."""
 
 
-QUERY_ROUTER_PROMPT = """You are an advanced query routing engine for a multi-purpose RAG (Retrieval-Augmented Generation) system. Your sole task is to analyze the user's input and determine whether answering it requires pulling context from the uploaded document library ("RAG_RETRIEVAL") or if it is a basic conversational interaction that can be handled directly by a general LLM ("DIRECT_LLM").
+QUERY_ROUTER_PROMPT = """You are an advanced query routing engine for a multi-purpose RAG (Retrieval-Augmented Generation) system. 
+Your sole task is to analyze the user's input and determine whether answering it requires pulling context from the uploaded document library 
+("RAG_RETRIEVAL") or if it is a basic conversational interaction that can be handled directly by a general LLM ("DIRECT_LLM").
 
 Analyze the input based on these strict definitions:
 
@@ -93,10 +99,10 @@ Input: "who are you"
 Output: {{"reasoning": "Identity meta-question about the AI assistant itself.", "route": "DIRECT_LLM"}}
 
 Input: "who am I"
-Output: {{"reasoning": "Conversational test or generic philosophical statement regarding the user's immediate state.", "route": "DIRECT_LLM"}}
+Output: {{"reasoning": "Conversational test or generic statement regarding the user's identity.", "route": "DIRECT_LLM"}}
 
 Input: "Explain the core concept of the mind-body dualism mentioned in the texts."
-Output: {{"reasoning": "Substantive conceptual question requiring deep thematic analysis from the library documents.", "route": "RAG_RETRIEVAL"}}
+Output: {{"reasoning": "Substantive philosophical conceptual question requiring deep thematic analysis from the library documents.", "route": "RAG_RETRIEVAL"}}
 
 Input: "What are the primary arguments presented in chapter 2?"
 Output: {{"reasoning": "Explicit request for structural content tracking directly inside the reference material.", "route": "RAG_RETRIEVAL"}}

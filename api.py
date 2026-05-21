@@ -6,7 +6,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, configure_logging, build_citation_map, QueryRouter
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, configure_logging, QueryRouter
 from rag_engine.prompts import DIRECT_LLM_SYSTEM_PROMPT
 from rag_engine.evaluation import RagasEvaluator
 
@@ -42,7 +42,8 @@ class QueryRequest(BaseModel):
 
     query: str
     model: str = "local-llm"
-    top_n: int = 3
+    top_k_retrieval: int = 20
+    top_k_llm: int = 3
     use_hyde: bool = False
     history: Optional[List[Dict[str, str]]] = None
 
@@ -139,7 +140,8 @@ async def query_engine(payload: QueryRequest):
         retrieve_start = time.time()
         contexts = await core_engine.search(
             query=payload.query,
-            top_n=payload.top_n,
+            top_k_retrieval=payload.top_k_retrieval,
+            top_k_llm=payload.top_k_llm,
             use_hyde=payload.use_hyde
         )
         retrieve_duration = time.time() - retrieve_start
@@ -218,7 +220,7 @@ async def query_engine(payload: QueryRequest):
             "generation_latency_ms": gen_duration * 1000,
             "retrieved_nodes": clean_contexts,
             "llm_metrics": result.get("llm_metrics"),
-            "citation_map": build_citation_map(answer, contexts)
+            "citation_map": result.get("citation_map", {})
         }
     except Exception as e:
 

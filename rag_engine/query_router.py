@@ -1,5 +1,15 @@
 import json
 import logging
+
+try:
+    from opensmith import trace
+except ImportError:
+    def trace(*args, **kwargs):
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        def decorator(f):
+            return f
+        return decorator
 from typing import Dict, Any
 from rag_engine.prompts import QUERY_ROUTER_PROMPT
 from rag_engine.llm import LiteLLMClient
@@ -14,6 +24,7 @@ class QueryRouter:
 
         self.llm_client = llm_client
 
+    @trace(tags=["query_router", "route_query"])
     async def route_query(self, user_query: str) -> Dict[str, Any]:
 
         prompt = QUERY_ROUTER_PROMPT.format(user_query=user_query)

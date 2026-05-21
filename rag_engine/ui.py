@@ -82,16 +82,25 @@ def render_chat_history(messages: List[Dict[str, Any]]):
                                 st.write(
                                     f"• **{call['purpose']}**: "
                                     f"{call['elapsed_ms']/1000:.1f}s, "
-                                    f"{call['prompt_tokens']}+{call['completion_tokens']} tokens"
+                                    f"{call['total_tokens']} tokens"
                                 )
                     
-                    citation_map = build_citation_map(content, retrieved_contexts)
+                    citation_map = msg.get("citation_map") or build_citation_map(content, retrieved_contexts)
                     if citation_map:
-                        st.markdown("##### 📖 Cited Sources")
+                        st.markdown("##### 📄 Sources Cited in Answer")
                         for ref, info in citation_map.items():
-                            st.write(f"{ref} → {info['filename']} (p. {info['page']})")
-
-                    render_retrieved_sources(retrieved_contexts)
+                            ref_display = ref if ref.startswith('[') else f"[{ref}]"
+                            pn = info.get('page_number', info.get('page', '?'))
+                            score = info.get('score', 0.0)
+                            title = f"{ref_display} {info.get('filename', 'Unknown')} • p. {pn} — Score: {score:.4f}"
+                            with st.expander(title):
+                                st.markdown(f"**File:** {info.get('filename', 'Unknown')}")
+                                st.markdown(f"**Page:** {pn}")
+                                st.markdown(f"**Score:** {score:.4f}")
+                                if info.get('chunk_id'):
+                                    st.markdown(f"**Chunk ID:** `{info['chunk_id']}`")
+                                st.markdown("---")
+                                st.markdown(info.get('text', ''))
 
 
 def render_reasoning_step(title: str, content: str, expanded: bool = False):

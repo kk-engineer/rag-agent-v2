@@ -137,13 +137,18 @@ class VectorStore:
         file_id: str,
         source: str,
         filename: str,
+        chunk_ids: Optional[List[str]] = None,
     ) -> List[str]:
 
         if not chunks:
             return []
-        ids = [f"{file_id}#chunk_{i}" for i in range(len(chunks))]
+        if chunk_ids is None:
+            ids = [f"{file_id}#chunk_{i}" for i in range(len(chunks))]
+        else:
+            ids = chunk_ids
         metadatas = [
             {
+                "chunk_id": ids[i],
                 "text": chunks[i]["text"],
                 "page_number": chunks[i]["page_number"],
                 "source": source,
@@ -178,6 +183,7 @@ class VectorStore:
             chunks.append(
                 {
                     "child_id": cid,
+                    "chunk_id": meta.get("chunk_id", cid),
                     "text": meta["text"],
                     "page_number": meta["page_number"],
                     "source": meta["source"],

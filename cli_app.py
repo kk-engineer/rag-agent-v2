@@ -4,7 +4,7 @@ import asyncio
 import click
 import logging
 import sys
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory, configure_logging, build_citation_map, QueryRouter
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory, configure_logging, QueryRouter
 from rag_engine.prompts import DIRECT_LLM_SYSTEM_PROMPT
 from rag_engine.cli import REPLManager
 
@@ -110,20 +110,21 @@ async def query_callback(query: str):
         await asyncio.sleep(0.01)
 
     # 5. Yield citation map (sources actually cited in the answer)
-    citation_map = build_citation_map(answer, contexts)
+    citation_map = result.get("citation_map", {})
     if citation_map:
         cited_str = "\n\n\033[33m📖 Cited Sources:\033[0m\n"
         for ref, info in citation_map.items():
-            cited_str += f"  {ref} → {info['filename']} (p. {info['page']})\n"
+            cited_str += f"  [{ref}] {info['filename']} (p. {info['page_number']})\n"
         yield cited_str
 
-    # 6. Yield source references mapping
-    if contexts:
+    # 6. Yield source references mapping using citation_map
+    citation_map = result.get("citation_map", {})
+    if citation_map:
         sources_str = "\n\n📚 Sources:\n"
-        for idx, ctx in enumerate(contexts):
+        for ref, info in citation_map.items():
             sources_str += (
-                f"  \033[1m[{idx}]\033[0m {ctx.get('filename')} "
-                f"(p. {ctx.get('page_number')}) - Score: {ctx.get('score', 0.0):.4f}\n"
+                f"  \033[1m[{ref}]\033[0m {info.get('filename')} "
+                f"(p. {info.get('page_number')}) - Chunk: {info.get('chunk_id', 'N/A')}\n"
             )
         yield sources_str
 

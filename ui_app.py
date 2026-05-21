@@ -53,7 +53,7 @@ from rag_engine.ui import (
 
 
 st.set_page_config(
-    page_title="Enterprise RAG Engine Dashboard",
+    page_title="RoboSathi RAG Engine Dashboard",
     page_icon="🤖",
     layout="wide"
 )
@@ -529,6 +529,7 @@ if st.session_state.generating and st.session_state.pending_query:
             "role": "assistant",
             "content": final_answer,
             "retrieved_contexts": retrieved_contexts,
+            "citation_map": result.get("citation_map", {}),
             "latency_retrieve": latency_retrieve,
             "llm_metrics": result.get("llm_metrics")
         })

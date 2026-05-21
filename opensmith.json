@@ -1,0 +1,5 @@
+{
+  "db_path": "logs/opensmith_traces.db",
+  "console_mode": false,
+  "autopatch": []
+}

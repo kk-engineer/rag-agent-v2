@@ -77,7 +77,8 @@ class RAGCoreEngine:
                 "k": 1.0
             },
             "retrieval": {
-                "top_n": 5,
+                "top_k_retrieval": 35,
+                "top_k_llm": 5,
                 "use_hyde": False,
                 "rrf_k": 60,
                 "rrf_weight_sparse": 1.0,
@@ -255,6 +256,7 @@ class RAGCoreEngine:
         return full_text, pages
 
 
+    @trace(tags=["core_engine", "semantic_chunking"])
     async def chunk_semantically(
         self,
         pages: List[Dict[str, Any]],
@@ -453,9 +455,10 @@ class RAGCoreEngine:
                 
                 for idx, chunk in enumerate(chunks):
 
-                    child_id = str(uuid.uuid4())
+                    child_id = f"{doc_id}#chunk_{idx}"
                     self.child_nodes.append({
                         "child_id": child_id,
+                        "chunk_id": child_id,
                         "parent_id": doc_id,
                         "text": chunk["text"],
                         "page_number": chunk["page_number"],
@@ -476,6 +479,7 @@ class RAGCoreEngine:
             return doc_id
 
 
+    @trace(tags=["core_engine", "persist_ingestion"])
     async def _ingest_file_persist(self, file_path: str) -> str:
 
         async with self.lock:
@@ -511,8 +515,10 @@ class RAGCoreEngine:
             embeddings = await self.llm_client.aembedding(chunk_texts)
             embed_duration = time.time() - embed_start
 
-            chunk_ids = self.vector_store.add_chunks_batch(
+            chunk_ids = [f"{doc_id}#chunk_{i}" for i in range(len(chunks))]
+            self.vector_store.add_chunks_batch(
                 chunks=chunks,
+                chunk_ids=chunk_ids,
                 embeddings=embeddings,
                 file_id=doc_id,
                 source=file_path,
@@ -571,6 +577,7 @@ class RAGCoreEngine:
         self.bm25 = BM25Okapi(corpus)
 
 
+    @trace(tags=["core_engine", "hyde_embedding"])
     async def retrieve_hyde_query_embedding(self, query: str) -> List[float]:
 
         # HyDE expansion: Generate hypothetical document
@@ -593,7 +600,8 @@ class RAGCoreEngine:
     async def search(
         self,
         query: str,
-        top_n: Optional[int] = None,
+        top_k_retrieval: Optional[int] = None,
+        top_k_llm: Optional[int] = None,
         use_hyde: Optional[bool] = None,
         rrf_k: Optional[int] = None
     ) -> List[Dict[str, Any]]:
@@ -605,15 +613,24 @@ class RAGCoreEngine:
         search_start = time.time()
         logger.info(f"Initiating multi-vector search for query: '{query}'")
 
-        if top_n is None:
+        if top_k_retrieval is None:
 
-            top_n = self.config["retrieval"]["top_n"]
+            top_k_retrieval = self.config["retrieval"]["top_k_retrieval"]
+        if top_k_llm is None:
+
+            top_k_llm = self.config["retrieval"]["top_k_llm"]
         if use_hyde is None:
 
             use_hyde = self.config["retrieval"]["use_hyde"]
         if rrf_k is None:
 
             rrf_k = self.config["retrieval"]["rrf_k"]
+
+        logger.info(
+            f"Search config: top_k_retrieval={top_k_retrieval}, "
+            f"top_k_llm={top_k_llm}, use_hyde={use_hyde}, "
+            f"chunks_in_db={len(self.child_nodes)}"
+        )
 
         # 1. Sparse (BM25) Retrieve
         sparse_start = time.time()
@@ -623,7 +640,18 @@ class RAGCoreEngine:
             tokenized_query = tokenize(query)
             bm25_scores = self.bm25.get_scores(tokenized_query)
         sparse_duration = time.time() - sparse_start
-        logger.info(f"  [Search Step 1/4] Sparse BM25 retrieval completed. Time taken: {sparse_duration:.3f}s")
+        logger.info(f"  [Search Step 1/4] Sparse BM25 retrieval completed — scored {len(bm25_scores)} chunks. Time taken: {sparse_duration:.3f}s")
+        if len(bm25_scores) > 0:
+            top_bm25_indices = np.argsort(bm25_scores)[-20:][::-1]
+            logger.debug(
+                f"    Sparse — tokenized query: {tokenized_query}\n"
+                f"    Sparse — top-20 scores (idx:score): "
+                + ", ".join(
+                    f"{i}:{bm25_scores[i]:.4f}" for i in top_bm25_indices
+                )
+            )
+        else:
+            logger.debug("    Sparse — no BM25 index available")
 
         # 2. Dense (Vector) Retrieve
         dense_start = time.time()
@@ -654,7 +682,15 @@ class RAGCoreEngine:
 
                 vector_scores.append(0.0)
         dense_duration = time.time() - dense_start
-        logger.info(f"  [Search Step 2/4] Dense vector similarity retrieval completed. Time taken: {dense_duration:.3f}s")
+        logger.info(f"  [Search Step 2/4] Dense vector similarity retrieval completed — scored {len(vector_scores)} chunks. Time taken: {dense_duration:.3f}s")
+        logger.debug(
+            f"    Dense — query vector (first 5 dims): {qv[:5].tolist()}\n"
+            f"    Dense — top-20 scores: "
+            + ", ".join(
+                f"idx={i}:{vector_scores[i]:.4f}"
+                for i in np.argsort(vector_scores)[-20:][::-1]
+            )
+        )
 
         # 3. Reciprocal Rank Fusion (RRF)
         rrf_start = time.time()
@@ -695,16 +731,39 @@ class RAGCoreEngine:
             })
 
         scored_nodes.sort(key=lambda x: x["rrf_score"], reverse=True)
-        top_nodes = scored_nodes[:top_n]
+        top_nodes = scored_nodes[:top_k_retrieval]
         rrf_duration = time.time() - rrf_start
-        logger.info(f"  [Search Step 3/4] RRF fusion complete (Top {len(top_nodes)} candidate nodes). Time taken: {rrf_duration:.3f}s")
+        logger.info(f"  [Search Step 3/4] RRF fusion complete — {len(scored_nodes)} merged → top {len(top_nodes)} candidates. Time taken: {rrf_duration:.3f}s")
+        logger.debug(
+            f"    RRF — weights: rrf_weight_sparse={rrf_weight_sparse}, "
+            f"rrf_weight_dense={rrf_weight_dense}, rrf_k={rrf_k}\n"
+            f"    RRF — top-20 candidates:\n"
+            + "\n".join(
+                f"      [{i}] child_id={item['node'].get('child_id','?')[:40]}... "
+                f"rrf={item['rrf_score']:.4f} "
+                f"file={item['node'].get('filename','?')} "
+                f"pg={item['node'].get('page_number','?')}"
+                for i, item in enumerate(top_nodes[:20])
+            )
+        )
 
         # 4. Rerank nodes using LLM interface rerank
         rerank_start = time.time()
         node_texts = [item["node"]["text"] for item in top_nodes]
-        reranked = self.llm_client.rerank(query, node_texts, top_n=top_n)
+        reranked = self.llm_client.rerank(query, node_texts, top_n=top_k_llm)
         rerank_duration = time.time() - rerank_start
-        logger.info(f"  [Search Step 4/4] Cohere/LiteLLM Reranker completed. Time taken: {rerank_duration:.3f}s")
+        logger.info(f"  [Search Step 4/4] Reranker completed — re-ranked {len(node_texts)} → {len(reranked)} chunks. Time taken: {rerank_duration:.3f}s")
+        logger.debug(
+            f"    Reranker — input texts (truncated):\n"
+            + "\n".join(
+                f"      [{i}] {t[:120]}..." for i, t in enumerate(node_texts)
+            ) + "\n"
+            f"    Reranker — output scores:\n"
+            + "\n".join(
+                f"      [{r['index']}] score={r['score']:.4f}"
+                for r in reranked
+            )
+        )
 
         # Construct final output list with Parent-Document contexts
         final_results = []
@@ -731,6 +790,7 @@ class RAGCoreEngine:
                     scaled_score = 0.0
 
             final_results.append({
+                "chunk_id": matched_node.get("chunk_id") or matched_node.get("child_id"),
                 "text": matched_node["text"],
                 "page_number": matched_node["page_number"],
                 "source": matched_node["source"],
@@ -741,6 +801,40 @@ class RAGCoreEngine:
             })
 
         search_total_duration = time.time() - search_start
-        logger.info(f"Successfully completed multi-vector search in {search_total_duration:.3f}s (Sparse: {sparse_duration:.3f}s, Dense: {dense_duration:.3f}s, RRF: {rrf_duration:.3f}s, Rerank: {rerank_duration:.3f}s)")
+        logger.info(
+            f"Successfully completed multi-vector search in {search_total_duration:.3f}s "
+            f"(Sparse: {sparse_duration:.3f}s, Dense: {dense_duration:.3f}s, "
+            f"RRF: {rrf_duration:.3f}s, Rerank: {rerank_duration:.3f}s) — "
+            f"top_k_retrieval={top_k_retrieval}, top_k_llm={top_k_llm}"
+        )
+        logger.debug(
+            f"Final {len(final_results)} results:\n"
+            + "\n".join(
+                f"  [{i}] chunk_id={r['chunk_id'][:40]}... "
+                f"file={r['filename']} pg={r['page_number']} "
+                f"score={r['score']:.4f}"
+                for i, r in enumerate(final_results)
+            )
+        )
         
         return final_results
+
+
+    @staticmethod
+    def prepare_context_and_citations(search_results: list) -> tuple[str, dict]:
+        citation_map = {}
+        context_blocks = []
+
+        for index, match in enumerate(search_results, start=1):
+            str_idx = str(index)
+            citation_map[str_idx] = {
+                "chunk_id": match.get("chunk_id"),
+                "filename": match.get("filename", "Unknown"),
+                "page_number": match.get("page_number"),
+                "score": float(match.get("score", 0.0)),
+                "text": match.get("text", ""),
+            }
+            block = f"--- Document [{str_idx}] ---\n{match['text']}\n"
+            context_blocks.append(block)
+
+        return "\n".join(context_blocks), citation_map

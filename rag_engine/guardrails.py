@@ -60,28 +60,26 @@ def strip_citations(text: str) -> str:
 
         return ""
     import re
-    return re.sub(r"\s*\[Doc-\d+(?:,\s*p\.\s*\d+)?\]", "", text)
+    return re.sub(r"\s*\[\d+\]", "", text)
 
 
 def build_citation_map(answer: str, contexts: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Parse [Doc-X, p. Y] references from answer and map to source filenames."""
+    """Parse [N] numeric token references from answer and map to source metadata."""
     import re
     citation_map: Dict[str, Dict[str, Any]] = {}
     if not answer or not contexts:
         return citation_map
 
-    refs = re.findall(r"\[Doc-(\d+)(?:,\s*p\.\s*(\d+))?\]", answer)
-    for doc_id_str, page_str in refs:
-        doc_id = int(doc_id_str)
-        if doc_id < len(contexts):
+    refs = re.findall(r"\[(\d+)\]", answer)
+    for doc_idx_str in refs:
+        doc_id = int(doc_idx_str) - 1  # convert to 0-based
+        if 0 <= doc_id < len(contexts):
             ctx = contexts[doc_id]
-            key = f"[Doc-{doc_id_str}"
-            if page_str:
-                key += f", p. {page_str}"
-            key += "]"
+            key = f"[{doc_idx_str}]"
             citation_map[key] = {
                 "filename": ctx.get("filename", "Unknown"),
-                "page": int(page_str) if page_str else ctx.get("page_number"),
+                "page": ctx.get("page_number"),
+                "chunk_id": ctx.get("chunk_id"),
                 "score": ctx.get("score", 0.0),
             }
     return citation_map
@@ -129,60 +127,46 @@ class GuardrailsManager:
         contexts: List[Dict[str, Any]]
     ) -> Tuple[bool, List[Dict[str, Any]]]:
 
-        # Find all occurrences of [Doc-X, p. Y]
-        pattern = r"\[Doc-(\d+),\s*p\.\s*(\d+)\]"
+        # Find all occurrences of [N] numeric tokens
+        pattern = r"\[(\d+)\]"
         matches = re.findall(pattern, response)
         
         invalid_citations = []
         is_valid = True
 
-        for match in matches:
+        for doc_idx_str in matches:
 
-            doc_idx_str, page_str = match
-            doc_idx = int(doc_idx_str)
-            page_num = int(page_str)
+            doc_idx = int(doc_idx_str) - 1  # convert 1-based token to 0-based index
 
-            # Check index range
             if doc_idx < 0 or doc_idx >= len(contexts):
 
                 is_valid = False
                 invalid_citations.append({
-                    "citation": f"[Doc-{doc_idx_str}, p. {page_str}]",
-                    "reason": f"Document index {doc_idx} is out of range (total documents: {len(contexts)})"
-                })
-                continue
-
-            # Check page number range
-            target_context = contexts[doc_idx]
-            expected_page = target_context.get("page_number", 1)
-            
-            # Allow page number mismatch check
-            if page_num != expected_page:
-
-                is_valid = False
-                invalid_citations.append({
-                    "citation": f"[Doc-{doc_idx_str}, p. {page_str}]",
-                    "reason": f"Page number {page_num} does not match expected page number {expected_page} for source context"
+                    "citation": f"[{doc_idx_str}]",
+                    "reason": f"Document index {doc_idx_str} is out of range (total documents: {len(contexts)})"
                 })
 
         return is_valid, invalid_citations
 
 
+    @trace(tags=["guardrails", "faithfulness_check"])
     async def check_faithfulness(
         self,
         answer: str,
         contexts: List[Dict[str, Any]],
         model: str = "local-llm",
-        metrics_collector: Optional[Any] = None
+        metrics_collector: Optional[Any] = None,
+        formatted_context: Optional[str] = None
     ) -> Dict[str, Any]:
 
-        formatted_context = ""
-        for idx, ctx in enumerate(contexts):
+        if formatted_context is None:
 
-            formatted_context += f"[Doc-{idx}, p. {ctx.get('page_number', 1)}]: {ctx['text']}\n\n"
+            from rag_engine.core import RAGCoreEngine
+            _, formatted_context = RAGCoreEngine.prepare_context_and_citations(contexts)
 
         prompt = FAITHFULNESS_CHECK_PROMPT.format(context=formatted_context, answer=answer)
         messages = [{"role": "user", "content": prompt}]
+        logger.debug(f"  [Faithfulness check] PROMPT:\n{prompt}")
 
         try:
 
@@ -194,6 +178,7 @@ class GuardrailsManager:
                 metrics_purpose="Faithfulness check"
             )
             eval_text = response.choices[0].message.content
+            logger.debug(f"  [Faithfulness check] RESPONSE:\n{eval_text}")
             return extract_json(eval_text)
         except Exception as e:
 
@@ -222,7 +207,11 @@ class GuardrailsManager:
         llm_metrics = LLMMetricsCollector()
 
         total_gen_start = time.time()
-        logger.info(f"Generating faithful answer for query: '{query}'")
+        logger.info(
+            f"Generating faithful answer — "
+            f"model={model}, gen_tokens={gen_tokens}, max_attempts={max_attempts}, "
+            f"contexts={len(contexts)}, query='{query[:80]}{'...' if len(query) > 80 else ''}'"
+        )
 
         if on_thought:
 
@@ -232,6 +221,7 @@ class GuardrailsManager:
 
             # Simple fallback generation if no context retrieved
             messages = [{"role": "user", "content": query}]
+            logger.debug(f"  [No-context fallback] PROMPT:\n{query}")
             fallback_start = time.time()
             response = await self.llm_client.acompletion(
                 messages=messages,
@@ -242,7 +232,16 @@ class GuardrailsManager:
                 metrics_purpose="No-context fallback"
             )
             fallback_duration = time.time() - fallback_start
-            logger.info(f"  [Generation Step 1] Fallback answer generation completed (No context). Time taken: {fallback_duration:.3f}s")
+            answer = response.choices[0].message.content
+            usage = getattr(response, "usage", None)
+            pt = usage.prompt_tokens if usage else 0
+            ct = usage.completion_tokens if usage else 0
+            tt = usage.total_tokens if usage else 0
+            logger.info(
+                f"  [Generation Step 1] Fallback (no context) — "
+                f"tokens: {pt}+{ct}={tt}, time: {fallback_duration:.3f}s"
+            )
+            logger.debug(f"  [No-context fallback] RESPONSE:\n{answer}")
             if on_thought:
 
                 on_thought(f"⏱️ Fallback answer formulation completed. Time taken: {fallback_duration:.3f}s")
@@ -252,18 +251,19 @@ class GuardrailsManager:
                 "attempts": 1,
                 "invalid_citations": [],
                 "contradictions": [],
+                "citation_map": {},
                 "llm_metrics": llm_metrics.to_dict()
             }
 
-        # 1. Format the context for prompt input
-        formatted_context = ""
-        for idx, ctx in enumerate(contexts):
-
-            formatted_context += f"[Doc-{idx}, p. {ctx.get('page_number', 1)}]: {ctx['text']}\n\n"
+        # 1. Format the context for prompt input via sequential citation mapping
+        from rag_engine.core import RAGCoreEngine
+        formatted_context, citation_map = RAGCoreEngine.prepare_context_and_citations(contexts)
+        logger.info(f"  Context prepared — {len(citation_map)} chunks, {len(formatted_context)} chars")
 
         # 2. Initial answer generation
         prompt = CITATION_GENERATION_PROMPT.format(chat_history=chat_history, context=formatted_context, query=query)
         messages = [{"role": "user", "content": prompt}]
+        logger.debug(f"  [Initial generation] PROMPT:\n{prompt}")
         
         initial_start = time.time()
         response = await self.llm_client.acompletion(
@@ -276,7 +276,12 @@ class GuardrailsManager:
         )
         answer = response.choices[0].message.content
         initial_duration = time.time() - initial_start
-        logger.info(f"  [Generation Step 1] Initial answer generation completed. Time taken: {initial_duration:.3f}s")
+        usage = getattr(response, "usage", None)
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        tt = usage.total_tokens if usage else 0
+        logger.info(f"  [Generation Step 1] Initial answer — tokens: {pt}+{ct}={tt}, time: {initial_duration:.3f}s")
+        logger.debug(f"  [Initial generation] RESPONSE:\n{answer}")
         if on_thought:
 
             on_thought(f"⏱️ Initial answer formulation completed. Time taken: {initial_duration:.3f}s")
@@ -292,17 +297,25 @@ class GuardrailsManager:
             cit_start = time.time()
             citations_ok, invalid_citations = self.validate_citations(answer, contexts)
             cit_duration = time.time() - cit_start
-            logger.info(f"  [Generation Step 2.1 (Attempt {attempt + 1})] Citation check completed. Time taken: {cit_duration:.3f}s")
+            logger.info(
+                f"  [Generation Step 2.1 (Attempt {attempt + 1})] Citation check — "
+                f"valid={citations_ok}, invalid_count={len(invalid_citations)}, "
+                f"time: {cit_duration:.3f}s"
+            )
             if on_thought:
 
                 on_thought(f"⏱️ Citation check (Attempt {attempt + 1}) completed. Time taken: {cit_duration:.3f}s")
 
             # Check faithfulness
             faith_start = time.time()
-            eval_data = await self.check_faithfulness(answer, contexts, model=model, metrics_collector=llm_metrics)
+            eval_data = await self.check_faithfulness(answer, contexts, model=model, metrics_collector=llm_metrics, formatted_context=formatted_context)
             is_faithful = eval_data.get("faithful", True)
             faith_duration = time.time() - faith_start
-            logger.info(f"  [Generation Step 2.2 (Attempt {attempt + 1})] Faithfulness check completed. Time taken: {faith_duration:.3f}s")
+            logger.info(
+                f"  [Generation Step 2.2 (Attempt {attempt + 1})] Faithfulness check — "
+                f"faithful={is_faithful}, claims_evaluated={len(eval_data.get('claims', []))}, "
+                f"time: {faith_duration:.3f}s"
+            )
             if on_thought:
 
                 on_thought(f"⏱️ Faithfulness check (Attempt {attempt + 1}) completed. Time taken: {faith_duration:.3f}s")
@@ -314,13 +327,19 @@ class GuardrailsManager:
                     on_thought(f"✅ Success! Generated answer passed all alignment checks. Total verification time: {(time.time() - total_gen_start):.3f}s")
 
                 total_gen_duration = time.time() - total_gen_start
-                logger.info(f"Successfully generated faithful answer in {total_gen_duration:.3f}s (Attempts: {attempt + 1})")
+                logger.info(
+                    f"Successfully generated faithful answer — "
+                    f"attempts={attempt + 1}, total_time={total_gen_duration:.3f}s, "
+                    f"citation_map_refs={len(citation_map)}, "
+                    f"answer_len={len(answer)} chars"
+                )
                 return {
                     "answer": answer,
                     "faithful": True,
                     "attempts": attempt + 1,
                     "invalid_citations": [],
                     "contradictions": [],
+                    "citation_map": citation_map,
                     "llm_metrics": llm_metrics.to_dict()
                 }
 
@@ -363,6 +382,7 @@ class GuardrailsManager:
             )
 
             messages = [{"role": "user", "content": rewrite_prompt}]
+            logger.debug(f"  [Rewrite attempt {attempt + 1}] PROMPT:\n{rewrite_prompt}")
             rewrite_start = time.time()
             rewrite_res = await self.llm_client.acompletion(
                 messages=messages,
@@ -374,14 +394,27 @@ class GuardrailsManager:
             )
             answer = rewrite_res.choices[0].message.content
             rewrite_duration = time.time() - rewrite_start
-            logger.info(f"  [Generation Step 2.3 (Attempt {attempt + 1})] Self-correction rewrite generation completed. Time taken: {rewrite_duration:.3f}s")
+            usage = getattr(rewrite_res, "usage", None)
+            pt = usage.prompt_tokens if usage else 0
+            ct = usage.completion_tokens if usage else 0
+            tt = usage.total_tokens if usage else 0
+            logger.info(
+                f"  [Generation Step 2.3 (Attempt {attempt + 1})] Self-correction rewrite — "
+                f"tokens: {pt}+{ct}={tt}, contradictions_fixed={len(contradictions)}, "
+                f"time: {rewrite_duration:.3f}s"
+            )
+            logger.debug(f"  [Rewrite attempt {attempt + 1}] RESPONSE:\n{answer}")
             if on_thought:
 
                 on_thought(f"⏱️ Rewrite generation (Attempt {attempt + 1}) completed. Time taken: {rewrite_duration:.3f}s")
 
         # If we exhausted attempts without passing checks, return latest state but flagged
         total_gen_duration = time.time() - total_gen_start
-        logger.warning(f"Exhausted self-correction attempts ({max_attempts}). Answer returned might still have alignment issues. Total time taken: {total_gen_duration:.3f}s")
+        logger.warning(
+            f"Exhausted self-correction attempts ({max_attempts}). "
+            f"Returning best-effort answer. "
+            f"total_time={total_gen_duration:.3f}s, answer_len={len(answer)} chars"
+        )
         if on_thought:
 
             on_thought(f"⚠️ Verification failed after {max_attempts} attempts. Total verification time: {total_gen_duration:.3f}s")
@@ -391,5 +424,6 @@ class GuardrailsManager:
             "attempts": max_attempts,
             "invalid_citations": invalid_citations,
             "contradictions": contradictions,
+            "citation_map": citation_map,
             "llm_metrics": llm_metrics.to_dict()
         }

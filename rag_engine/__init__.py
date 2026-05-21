@@ -1,3 +1,4 @@
+import os
 import re
 import warnings
 import logging
@@ -35,6 +36,13 @@ logging.getLogger("py.warnings").addFilter(zoedepth_filter)
 logging.getLogger().addFilter(zoedepth_filter)
 
 import sys
+
+_opensmith_db_path = os.environ.get("OPENSMITH_DB_PATH", "logs/opensmith_traces.db")
+try:
+    from opensmith import set_default_db_path
+    set_default_db_path(_opensmith_db_path)
+except ImportError:
+    pass
 
 
 class ColoredFormatter(logging.Formatter):

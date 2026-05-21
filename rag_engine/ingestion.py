@@ -3,6 +3,16 @@ import time
 import hashlib
 import uuid
 import logging
+
+try:
+    from opensmith import trace
+except ImportError:
+    def trace(*args, **kwargs):
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        def decorator(f):
+            return f
+        return decorator
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Set
 from rag_engine.vector_store import VectorStore
@@ -190,6 +200,7 @@ class IngestionCoordinator:
         await self._process_file(file_path, doc_id)
         return 1
 
+    @trace(tags=["ingestion", "file_processing"])
     async def _process_file(self, file_path: str, doc_id: str):
 
         filename = os.path.basename(file_path)
@@ -208,8 +219,10 @@ class IngestionCoordinator:
         embeddings = await self.llm_client.aembedding(chunk_texts)
         embed_duration = time.time() - embed_start
 
-        chunk_ids = self.vector_store.add_chunks_batch(
+        chunk_ids = [f"{doc_id}#chunk_{i}" for i in range(len(chunks))]
+        self.vector_store.add_chunks_batch(
             chunks=chunks,
+            chunk_ids=chunk_ids,
             embeddings=embeddings,
             file_id=doc_id,
             source=file_path,
