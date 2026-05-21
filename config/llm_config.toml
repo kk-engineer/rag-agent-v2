@@ -13,7 +13,7 @@ api_key = "llama.cpp"
 
 [llm.cloud]
 timeout = 60
-provider_order = ["groq", "nvidia", "gemini", "openrouter", "huggingface", "deepseek", "openai", "anthropic"]
+provider_order = ["gemini", "nvidia", "groq", "openrouter", "huggingface", "deepseek", "openai", "anthropic"]
 
 [llm.cloud.nvidia]
 base_url = "https://integrate.api.nvidia.com/v1"
@@ -21,7 +21,7 @@ model    = "meta/llama-3.1-8b-instruct"
 
 [llm.cloud.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-model    = "gemini-3.5-flash"
+model    = "gemini-2.5-flash-lite" # "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"
 
 [llm.cloud.groq]
 base_url = "https://api.groq.com/openai/v1"

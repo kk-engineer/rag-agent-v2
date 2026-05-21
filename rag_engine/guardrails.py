@@ -221,7 +221,7 @@ class GuardrailsManager:
 
         total_gen_start = time.time()
         logger.info(
-            f"\033[1;33m[GUARDRAILS]\033[0m Starting | "
+            f"\033[1;33m[GUARDRAILS START]\033[0m"
             f"model=\033[1;33m{model}\033[0m | "
             f"max_attempts={max_attempts} | contexts={len(contexts)} | "
             f"query='{query[:80]}{'...' if len(query) > 80 else ''}'"
@@ -349,7 +349,7 @@ class GuardrailsManager:
 
                 total_gen_duration = time.time() - total_gen_start
                 logger.info(
-                    f"\033[1;33m[GUARDRAILS]\033[0m Passed after {attempt + 1} attempt(s) | "
+                    f"\033[1;33m[GUARDRAILS END]\033[0m Passed after {attempt + 1} attempt(s) | "
                     f"total_time={total_gen_duration:.3f}s | "
                     f"citations={len(citation_map)} | "
                     f"answer_len={len(answer)} chars"

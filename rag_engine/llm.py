@@ -374,7 +374,7 @@ class LiteLLMClient:
                     api_key = os.environ.get("hf_api_key") or os.environ.get("HF_API_KEY") or os.environ.get("hf_token")
                     
             logger.info(f"Attempting cloud completion with provider: '{provider}', model: '{model}'")
-            
+
             litellm_kwargs = {
                 "messages": messages,
                 "stream": stream,
@@ -448,7 +448,7 @@ class LiteLLMClient:
                     ct = cf_usage.completion_tokens if cf_usage else 0
                     tt = cf_usage.total_tokens if cf_usage else 0
                     metrics_collector.add_call(metrics_purpose, cf_elapsed * 1000, pt, ct, tt, model=_cf_display)
-                logger.info(f"Cloud completion successful using provider '{provider}'.")
+                logger.info(f"Cloud completion successful using provider \033[1;36m[{provider}][{model}]\036")
                 return response
             except asyncio.TimeoutError:
 

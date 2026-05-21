@@ -632,7 +632,7 @@ class RAGCoreEngine:
             rrf_k = self.config["retrieval"]["rrf_k"]
 
         logger.info(
-            f"\033[1;33m[RETRIEVAL]\033[0m Starting | "
+            f"\033[1;33m[RETRIEVAL START]\033[0m"
             f"top_k={top_k_retrieval} | top_n={top_k_llm} | "
             f"hyde={use_hyde} | db_chunks={len(self.child_nodes)}"
         )
@@ -748,7 +748,7 @@ class RAGCoreEngine:
         # 4. Rerank nodes using LLM interface rerank
         rerank_start = time.time()
         node_texts = [item["node"]["text"] for item in top_nodes]
-        logger.debug(f"\033[1;33m[RERANKER]\033[0m Input: {len(node_texts)} texts to rerank against query='{query}'")
+        logger.debug(f"\033[1;34m[RERANKER]\033[0m Input: {len(node_texts)} texts to rerank against query='{query}'")
         reranked = self.llm_client.rerank(query, node_texts, top_n=top_k_llm)
         rerank_duration = time.time() - rerank_start
         logger.info(f"\033[1;33m[RERANKER]\033[0m Re-ranked {len(node_texts)} → {len(reranked)} chunks | time: {rerank_duration:.3f}s")
@@ -795,7 +795,7 @@ class RAGCoreEngine:
 
         search_total_duration = time.time() - search_start
         logger.info(
-            f"\033[1;33m[RETRIEVAL]\033[0m Completed in {search_total_duration:.3f}s | "
+            f"\033[1;33m[RETRIEVAL END]\033[0m Completed in {search_total_duration:.3f}s | "
             f"sparse={sparse_duration:.3f}s dense={dense_duration:.3f}s "
             f"rrf={rrf_duration:.3f}s rerank={rerank_duration:.3f}s | "
             f"results={len(final_results)}"
