@@ -119,7 +119,7 @@ Central repository for all LLM instructions. Contains 7 prompts:
 | Constant | Purpose |
 |---|---|
 | `HYDE_GENERATION_PROMPT` | Instructs the LLM to write a hypothetical document matching the query, used for HyDE query expansion |
-| `CITATION_GENERATION_PROMPT` | Directs the LLM to answer strictly from context with `[Doc-X, p. Y]` citations |
+| `CITATION_GENERATION_PROMPT` | Directs the LLM to answer strictly from context with `[N]` numeric citation tokens |
 | `FAITHFULNESS_CHECK_PROMPT` | Asks the LLM to evaluate each claim in the answer against the context, returning structured JSON |
 | `SELF_CORRECTION_REWRITE_PROMPT` | Provides contradiction details and asks the LLM to rewrite the answer faithfully |
 | `QUERY_ROUTER_PROMPT` | Classifies user input as `RAG_RETRIEVAL` or `DIRECT_LLM` using few-shot examples and JSON schema |
@@ -164,14 +164,14 @@ Central repository for all LLM instructions. Contains 7 prompts:
 
 The guardrails system implements a **three-stage hallucination defense**:
 
-- **Stage 1 — Prevention (`CITATION_GENERATION_PROMPT`)**: Prompts the LLM to produce answers with `[Doc-X, p. Y]` inline citations, grounded strictly in the retrieved context. This is the first line of defense — it sets strict boundaries before the LLM writes the answer.
+- **Stage 1 — Prevention (`CITATION_GENERATION_PROMPT`)**: Prompts the LLM to produce answers with `[N]` numeric citation tokens (e.g., `[1]`, `[2]`), grounded strictly in the retrieved context. This is the first line of defense — it sets strict boundaries before the LLM writes the answer.
 - **Stage 2 — Detection (`FAITHFULNESS_CHECK_PROMPT`)**: Sends the answer + context to the LLM with the faithfulness prompt, which receives a JSON report enumerating each atomic claim and whether it is supported. Acts as the automated judge that catches fabrications that slipped through prevention.
 - **Stage 3 — Correction (`SELF_CORRECTION_REWRITE_PROMPT`)**: If faithfulness fails, rewrites the answer using the rewrite prompt, providing specific contradictions identified by the detection stage. Then re-validates. Repeats up to `max_attempts` (default 3).
 
 Other responsibilities:
-- **Citation Validation**: Parses all `[Doc-X]` and `[Doc-X, p. Y]` references from the answer, validates indices against the context list, and checks page number bounds
+- **Citation Validation**: Parses all `[N]` numeric citation tokens from the answer and validates indices against the context list
 - **LLM Metrics Collection**: Creates an `LLMMetricsCollector` at the start of each query, threads it through every `acompletion()` call, and returns `llm_metrics` in the result dict.
-- **Citation Map**: `build_citation_map(answer, contexts)` parses all citation references from the final answer and maps each `[Doc-X, p. Y]` to the corresponding source filename, page, and score. Exposed via `__init__.py`.
+- **Citation Map**: `build_citation_map(answer, contexts)` parses all citation references from the final answer and maps each `[N]` token to the corresponding source filename, page, and score. Exposed via `__init__.py`.
 
 ---
 
@@ -254,76 +254,78 @@ Other responsibilities:
 ## Step-by-Step Query Execution Flow
 
 ```
-User Input
-    │
-    ▼
-1. QUERY ROUTING (QueryRouter.route_query)
-   │   temperature=0.0, max_tokens=128
-   │
-   ├──► DIRECT_LLM
-   │     │  Call LLM with lightweight system prompt
-   │     │  Return answer directly (no search, no guardrails)
-   │     ▼
-   │   Output: conversational response, no citations
-   │
-   └──► RAG_RETRIEVAL  ──►  continue to step 2
-   
-   2. HYBRID SEARCH (RAGCoreEngine.search)
-   │
-   ├───► [If use_hyde=true]  ──►  LLM generates hypothetical document  ──►  Embed document
-   │                                                                          │
-   └───► [If use_hyde=false] ─────────────────────────────────────────────────┼──► Embed query
-                                                                               │
-   ┌──────────────────────────────────────────────────────────────────────────┘
-   ▼
-   ├───► 2a. Sparse Retrieve: BM25 keyword scores
-   ├───► 2b. Dense Retrieve: Cosine similarity against all chunk embeddings
-   │
-   ▼
-   3. RRF FUSION
-   │   Combine sparse and dense rank arrays
-   │   score = rrf_weight_sparse / (rrf_k + rank_sparse)
-   │         + rrf_weight_dense  / (rrf_k + rank_dense)
-   ▼
-   4. TOP-N SELECTION
-   │   Select highest-scoring child nodes
-   ▼
-    5. CROSS-ENCODER RERANKING
-    │   Neural reranker re-scores candidates
-    │   Scale logits to [0.0, 1.0] via sigmoid
-    ▼
-    6. GUARDRAILS PIPELINE (three-stage hallucination defense)
-    │
-    ├───► STAGE 1 — PREVENTION
-    │     6a. Generate initial answer with CITATION_GENERATION_PROMPT
-    │         Every claim grounded with [Doc-X, p. Y]
-    │         Sets strict boundaries before LLM writes the answer
-    │
-    ▼
-    7. STAGE 2 — DETECTION (ITERATIVE VALIDATION LOOP, up to max_attempts)
-    │
-    ├───► 7a. Parse and validate all [Doc-X, p. Y] citations
-    │         - Doc index within bounds
-    │         - Page number matches source
-    │
-    ├───► 7b. Faithfulness check via FAITHFULNESS_CHECK_PROMPT
-    │         JSON output: per-claim supported/contradiction flags
-    │         Breaks answer into atomic claims, catches fabrications
-    │
-    ├───► [PASS] ─► Continue to step 8
-    │
-    └───► [FAIL] ─► STAGE 3 — CORRECTION (SELF_CORRECTION_REWRITE_PROMPT)
-                    │   Takes specific contradictions from Stage 2
-                    │   Forces LLM to rewrite, stripping ungrounded text
-                    └──► Retry from step 7a (Stage 2)
-   
-   8. OUTPUT CONSTRUCTION
-   │
-   ├───► Answer with preserved [Doc-X, p. Y] citations
-   ├───► Citation map: { "[Doc-0, p. 5]": {"filename": "...", "page": 5, "score": 0.9} }
-   ├───► Source listing with filenames, pages, scores
-   ├───► LLM Metrics: per-call breakdown (purpose, tokens, elapsed)
-   └───► Logged to telemetry + stdout
+USER SUBMITS QUERY
+        │
+        ▼
+┌──────────────────────────────────────────────┐
+│  0. ROUTING (QueryRouter.route_query)        │
+│     LLM call → classifies as DIRECT_LLM      │
+│                   or RAG_RETRIEVAL            │
+└──────────────┬───────────────────────────────┘
+               │
+    ┌──────────┴──────────┐
+    ▼                     ▼
+DIRECT_LLM           RAG_RETRIEVAL
+    │                     │
+    │                     ▼
+    │              ┌──────────────────────────┐
+    │              │  1. RETRIEVAL (core.py)  │
+    │              │  ─────────────────────── │
+    │              │  a. Sparse BM25 search   │
+    │              │  b. Dense vector search   │
+    │              │     (with optional HyDE) │
+    │              │  c. RRF fusion            │
+    │              │  d. Cross-encoder rerank  │
+    │              └──────────┬───────────────┘
+    │                         ▼
+    │              ┌──────────────────────────────┐
+    │              │  2. GUARDRAILS               │
+    │              │  ─────────────────────────── │
+    │              │                              │
+    │              │  STAGE 1 — PREVENTION        │
+    │              │  ─────────────────────────── │
+    │              │  CITATION GENERATION         │
+    │              │  LLM writes answer with      │
+    │              │  [N] citation tokens         │
+    │              │                              │
+    │              │         ▼                    │
+    │              │  ┌──────────────────────┐   │
+    │              │  │ ITERATIVE LOOP       │   │
+    │              │  │ (up to max_attempts) │   │
+    │              │  └──────────────────────┘   │
+    │              │         │                    │
+    │              │  STAGE 2 — DETECTION        │
+    │              │  ─────────────────────────── │
+    │              │  a. CITATION VALIDATION      │
+    │              │     Regex: are all [N] refs  │
+    │              │     within bounds? (NO LLM)  │
+    │              │                              │
+    │              │  b. FAITHFULNESS CHECK       │
+    │              │     LLM evaluates each       │
+    │              │     atomic claim against     │
+    │              │     context → supported?     │
+    │              │                              │
+    │              │     │ PASS?                  │
+    │              │  ┌──┴──┐                     │
+    │              │ YES   NO                     │
+    │              │  │     │                     │
+    │              │  │     ▼                     │
+    │              │  │  STAGE 3 — CORRECTION     │
+    │              │  │  ──────────────────────── │
+    │              │  │  SELF CORRECTION REWRITE  │
+    │              │  │  LLM rewrites answer      │
+    │              │  │  fixing contradictions    │
+    │              │  │         │                 │
+    │              │  │    loop back to           │
+    │              │  │    STAGE 2 (a+b)          │
+    │              │  │         │                 │
+    │              │  │    [exhausted? →          │
+    │              │  │     return best-effort]   │
+    │              │  │                           │
+    │              ▼  ▼                           │
+    │        Return answer +                      │
+    │        citation_map + metrics               │
+    └─────────────────────────────────────────────┘
 ```
 
 ---
@@ -339,13 +341,14 @@ QUERY_ROUTER_PROMPT ──► (classifies input)
 ╠══════════════════════════════════════════════╣
 ║ STAGE 1 — PREVENTION                         ║
 ║ CITATION_GENERATION_PROMPT ──► (generates    ║
-║   answer with [Doc-X, p. Y] citations,       ║
+║   answer with [N] numeric citation tokens,   ║
 ║   grounded strictly in context)              ║
 ╠══════════════════════════════════════════════╣
 ║ STAGE 2 — DETECTION                          ║
-║ FAITHFULNESS_CHECK_PROMPT ──► (evaluates     ║
-║   atomic claims against context, returns     ║
-║   JSON with per-claim supported flags)       ║
+║ ├─ CITATION VALIDATION (regex, no LLM)       ║
+║ └─ FAITHFULNESS_CHECK_PROMPT ──► (evaluates  ║
+║    atomic claims against context, returns    ║
+║    JSON with per-claim supported flags)      ║
 ╠══════════════════════════════════════════════╣
 ║                     │                         ║
 ║             ┌───────┴───────┐                ║
@@ -354,9 +357,9 @@ QUERY_ROUTER_PROMPT ──► (classifies input)
 ║             │               │                ║
 ║             │    STAGE 3 — CORRECTION        ║
 ║             │    SELF_CORRECTION_REWRITE_    ║
-║             │    PROMPT (rewrite with        ║
-║             │    specific contradictions,    ║
-║             │    then re-check from Stage 2) ║
+║             │    PROMPT (rewrite answer      ║
+║             │    with [N] tokens, fixing     ║
+║             │    specific contradictions)    ║
 ║             ▼               │                ║
 ║       Return answer   ──────┘ (up to         ║
 ║                           max_attempts)      ║

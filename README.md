@@ -1,4 +1,4 @@
-# RoboSathi RAG Engine 🤖
+# RoboSathi RAG Agent 🤖
 
 RAG (Retrieval-Augmented Generation) system that answers questions from your document library with verified citations. Runs on your machine — no cloud dependency required.
 
@@ -11,8 +11,7 @@ Upload PDFs, HTML files, Markdown docs, or source code. Ask questions in natural
 **Example:**
 ```
 You: Explain Viktor Frankl's concept of the meaning of life.
-Engine: Frankl argues that meaning is not abstract but unique to each individual...
-[Doc-0, p. 97] [Doc-0, p. 121]
+Engine: Frankl argues that meaning is not abstract but unique to each individual... [1] [3]
 ```
 
 ---
@@ -25,7 +24,7 @@ However, in a production RAG pipeline like this, guarding against hallucinations
 
 ### 1. Prevention: `CITATION_GENERATION_PROMPT`
 
-This is your first line of defense. It sets strict boundaries before the LLM even writes the answer by commanding it to use **ONLY** the provided context and demanding inline citations (`[1]`, `[2]`).
+This is your first line of defense. It sets strict boundaries before the LLM even writes the answer by commanding it to use **ONLY** the provided context and demanding inline numeric citation tokens (`[1]`, `[2]`).
 
 ### 2. Detection: `FAITHFULNESS_CHECK_PROMPT`
 
@@ -57,7 +56,7 @@ If hallucinated:
 | **Semantic Chunking** | Splits documents at natural topic boundaries using sentence embedding distance spikes |
 | **Hybrid Search** | Combines BM25 keyword matching + dense vector cosine similarity via RRF fusion |
 | **Cross-Encoder Reranking** | Neural reranker re-scores top candidates for maximum relevance |
-| **Citation Guardrails** | Validates every `[Doc-X, p. Y]` reference and checks claim faithfulness |
+| **Citation Guardrails** | Validates every `[N]` numeric citation token and checks claim faithfulness |
 | **Self-Correction Loop** | Up to 3 rewrite attempts if the answer fails faithfulness checks |
 | **Citation Map** | Parses citations in the answer and maps them back to source filenames and pages |
 | **LLM Metrics** | Tracks per-call token usage and timing for every LLM interaction |
@@ -143,32 +142,78 @@ curl http://localhost:8000/query \
 ## Architecture Overview
 
 ```
-User Input
-    │
-    ▼
-QueryRouter ──► DIRECT_LLM (greetings, small talk → direct LLM)
-    │
-    ▼ RAG_RETRIEVAL
-RAGCoreEngine.search()
-    ├── BM25 sparse retrieval
-    ├── Dense vector cosine similarity
-    ├── RRF fusion
-    └── Cross-encoder reranking
-    │
-    ▼
-GuardrailsManager.generate_faithful_answer()
-    │
-    ├── Stage 1 — Prevention: Generate answer with CITATION_GENERATION_PROMPT
-    │   ([Doc-X, p. Y] citations, grounded strictly in context)
-    │
-    ├── Stage 2 — Detection: Validate citations + Check faithfulness
-    │   via FAITHFULNESS_CHECK_PROMPT (per-claim JSON audit)
-    │
-    └── Stage 3 — Correction: Self-correct up to 3 attempts
-        via SELF_CORRECTION_REWRITE_PROMPT (rewrite if hallucinated)
-    │
-    ▼
-Output: cited answer + citation map + metrics
+USER SUBMITS QUERY
+        │
+        ▼
+┌──────────────────────────────────────────────┐
+│  0. ROUTING (QueryRouter.route_query)        │
+│     LLM call → classifies as DIRECT_LLM      │
+│                   or RAG_RETRIEVAL            │
+└──────────────┬───────────────────────────────┘
+               │
+    ┌──────────┴──────────┐
+    ▼                     ▼
+DIRECT_LLM           RAG_RETRIEVAL
+    │                     │
+    │                     ▼
+    │              ┌──────────────────────────┐
+    │              │  1. RETRIEVAL (core.py)  │
+    │              │  ─────────────────────── │
+    │              │  a. Sparse BM25 search   │
+    │              │  b. Dense vector search   │
+    │              │     (with optional HyDE) │
+    │              │  c. RRF fusion            │
+    │              │  d. Cross-encoder rerank  │
+    │              └──────────┬───────────────┘
+    │                         ▼
+    │              ┌──────────────────────────────┐
+    │              │  2. GUARDRAILS               │
+    │              │  ─────────────────────────── │
+    │              │                              │
+    │              │  STAGE 1 — PREVENTION        │
+    │              │  ─────────────────────────── │
+    │              │  CITATION GENERATION         │
+    │              │  LLM writes answer with      │
+    │              │  [N] citation tokens         │
+    │              │                              │
+    │              │         ▼                    │
+    │              │  ┌──────────────────────┐   │
+    │              │  │ ITERATIVE LOOP       │   │
+    │              │  │ (up to max_attempts) │   │
+    │              │  └──────────────────────┘   │
+    │              │         │                    │
+    │              │  STAGE 2 — DETECTION        │
+    │              │  ─────────────────────────── │
+    │              │  a. CITATION VALIDATION      │
+    │              │     Regex: are all [N] refs  │
+    │              │     within bounds? (NO LLM)  │
+    │              │                              │
+    │              │  b. FAITHFULNESS CHECK       │
+    │              │     LLM evaluates each       │
+    │              │     atomic claim against     │
+    │              │     context → supported?     │
+    │              │                              │
+    │              │     │ PASS?                  │
+    │              │  ┌──┴──┐                     │
+    │              │ YES   NO                     │
+    │              │  │     │                     │
+    │              │  │     ▼                     │
+    │              │  │  STAGE 3 — CORRECTION     │
+    │              │  │  ──────────────────────── │
+    │              │  │  SELF CORRECTION REWRITE  │
+    │              │  │  LLM rewrites answer      │
+    │              │  │  fixing contradictions    │
+    │              │  │         │                 │
+    │              │  │    loop back to           │
+    │              │  │    STAGE 2 (a+b)          │
+    │              │  │         │                 │
+    │              │  │    [exhausted? →          │
+    │              │  │     return best-effort]   │
+    │              │  │                           │
+    │              ▼  ▼                           │
+    │        Return answer +                      │
+    │        citation_map + metrics               │
+    └─────────────────────────────────────────────┘
 ```
 
 ### Project Structure
