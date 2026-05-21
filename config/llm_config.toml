@@ -13,7 +13,7 @@ api_key = "llama.cpp"
 
 [llm.cloud]
 timeout = 60
-provider_order = ["huggingface", "nvidia", "gemini", "openrouter", "deepseek", "openai", "anthropic"]
+provider_order = ["groq", "nvidia", "gemini", "openrouter", "huggingface", "deepseek", "openai", "anthropic"]
 
 [llm.cloud.nvidia]
 base_url = "https://integrate.api.nvidia.com/v1"
@@ -23,13 +23,17 @@ model    = "meta/llama-3.1-8b-instruct"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
 model    = "gemini-3.5-flash"
 
+[llm.cloud.groq]
+base_url = "https://api.groq.com/openai/v1"
+model    = "llama-3.3-70b-versatile" #  "llama-3.3-70b-versatile", "llama-3.1-8b-instant"
+
 [llm.cloud.openrouter]
 base_url = "https://openrouter.ai/api/v1"
-model    = "google/gemini-2.0-flash-lite-preview-02-05:free"
+model    = "openrouter/free"
 
 [llm.cloud.huggingface]
-base_url = "https://api-inference.huggingface.co/v1"
-model    = "mistralai/Mistral-7B-Instruct-v0.3"
+base_url = "https://router.huggingface.co/v1"
+model    = "Qwen/Qwen2.5-7B-Instruct"
 
 [llm.cloud.deepseek]
 base_url = "https://api.deepseek.com/v1"
@@ -42,7 +46,7 @@ model    = "gpt-4o-mini"
 model    = "claude-3-5-sonnet-latest"
 
 
-# Embedding Config
+# Embedding Models Config
 [embedding]
 mode = "local" # Options: "local", "cloud"
 

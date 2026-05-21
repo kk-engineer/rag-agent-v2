@@ -77,12 +77,13 @@ def render_chat_history(messages: List[Dict[str, Any]]):
                         col_l2.metric("Total Prompt Tokens", f"{llm_metrics['total_prompt_tokens']}")
                         col_l3.metric("Total Completion Tokens", f"{llm_metrics['total_completion_tokens']}")
                         col_l4.metric("Total LLM Time", f"{llm_metrics['total_llm_time_ms']/1000:.3f}s")
-                        with st.expander("Per-call breakdown"):
+                        with st.expander("Per-call breakdown", expanded=True):
                             for call in llm_metrics["per_call_breakdown"]:
-                                st.write(
-                                    f"• **{call['purpose']}**: "
+                                st.markdown(
+                                    f"• **{call['purpose']}** — "
                                     f"{call['elapsed_ms']/1000:.1f}s, "
-                                    f"{call['total_tokens']} tokens"
+                                    f"**{call['total_tokens']} tokens** "
+                                    f"(In={call['prompt_tokens']}, Out={call['completion_tokens']})"
                                 )
                     
                     citation_map = msg.get("citation_map") or build_citation_map(content, retrieved_contexts)

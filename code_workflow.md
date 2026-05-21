@@ -161,10 +161,15 @@ Central repository for all LLM instructions. Contains 7 prompts:
 ---
 
 ### `rag_engine/guardrails.py` — `GuardrailsManager`
-- **Citation Generation**: Prompts the LLM to produce answers with `[Doc-X, p. Y]` inline citations, grounded strictly in the retrieved context
+
+The guardrails system implements a **three-stage hallucination defense**:
+
+- **Stage 1 — Prevention (`CITATION_GENERATION_PROMPT`)**: Prompts the LLM to produce answers with `[Doc-X, p. Y]` inline citations, grounded strictly in the retrieved context. This is the first line of defense — it sets strict boundaries before the LLM writes the answer.
+- **Stage 2 — Detection (`FAITHFULNESS_CHECK_PROMPT`)**: Sends the answer + context to the LLM with the faithfulness prompt, which receives a JSON report enumerating each atomic claim and whether it is supported. Acts as the automated judge that catches fabrications that slipped through prevention.
+- **Stage 3 — Correction (`SELF_CORRECTION_REWRITE_PROMPT`)**: If faithfulness fails, rewrites the answer using the rewrite prompt, providing specific contradictions identified by the detection stage. Then re-validates. Repeats up to `max_attempts` (default 3).
+
+Other responsibilities:
 - **Citation Validation**: Parses all `[Doc-X]` and `[Doc-X, p. Y]` references from the answer, validates indices against the context list, and checks page number bounds
-- **Faithfulness Check**: Sends the answer + context to the LLM with `FAITHFULNESS_CHECK_PROMPT`, receives a JSON report enumerating each claim and whether it is supported. Detects contradictions and hallucinations.
-- **Self-Correction Loop**: If faithfulness fails, rewrites the answer using `SELF_CORRECTION_REWRITE_PROMPT`, then re-validates. Repeats up to `max_attempts` (default 3).
 - **LLM Metrics Collection**: Creates an `LLMMetricsCollector` at the start of each query, threads it through every `acompletion()` call, and returns `llm_metrics` in the result dict.
 - **Citation Map**: `build_citation_map(answer, contexts)` parses all citation references from the final answer and maps each `[Doc-X, p. Y]` to the corresponding source filename, page, and score. Exposed via `__init__.py`.
 
@@ -283,29 +288,34 @@ User Input
    4. TOP-N SELECTION
    │   Select highest-scoring child nodes
    ▼
-   5. CROSS-ENCODER RERANKING
-   │   Neural reranker re-scores candidates
-   │   Scale logits to [0.0, 1.0] via sigmoid
-   ▼
-   6. GUARDRAILS PIPELINE (GuardrailsManager.generate_faithful_answer)
-   │
-   ├───► 6a. Generate initial answer with CITATION_GENERATION_PROMPT
-   │        Every claim grounded with [Doc-X, p. Y]
-   │
-   ▼
-   7. ITERATIVE VALIDATION LOOP (up to max_attempts)
-   │
-   ├───► 7a. Parse and validate all [Doc-X, p. Y] citations
-   │         - Doc index within bounds
-   │         - Page number matches source
-   │
-   ├───► 7b. Faithfulness check via FAITHFULNESS_CHECK_PROMPT
-   │         JSON output: per-claim supported/contradiction flags
-   │
-   ├───► [PASS] ─► Continue to step 8
-   │
-   └───► [FAIL] ─► Rewrite via SELF_CORRECTION_REWRITE_PROMPT
-                   └──► Retry from step 7a
+    5. CROSS-ENCODER RERANKING
+    │   Neural reranker re-scores candidates
+    │   Scale logits to [0.0, 1.0] via sigmoid
+    ▼
+    6. GUARDRAILS PIPELINE (three-stage hallucination defense)
+    │
+    ├───► STAGE 1 — PREVENTION
+    │     6a. Generate initial answer with CITATION_GENERATION_PROMPT
+    │         Every claim grounded with [Doc-X, p. Y]
+    │         Sets strict boundaries before LLM writes the answer
+    │
+    ▼
+    7. STAGE 2 — DETECTION (ITERATIVE VALIDATION LOOP, up to max_attempts)
+    │
+    ├───► 7a. Parse and validate all [Doc-X, p. Y] citations
+    │         - Doc index within bounds
+    │         - Page number matches source
+    │
+    ├───► 7b. Faithfulness check via FAITHFULNESS_CHECK_PROMPT
+    │         JSON output: per-claim supported/contradiction flags
+    │         Breaks answer into atomic claims, catches fabrications
+    │
+    ├───► [PASS] ─► Continue to step 8
+    │
+    └───► [FAIL] ─► STAGE 3 — CORRECTION (SELF_CORRECTION_REWRITE_PROMPT)
+                    │   Takes specific contradictions from Stage 2
+                    │   Forces LLM to rewrite, stripping ungrounded text
+                    └──► Retry from step 7a (Stage 2)
    
    8. OUTPUT CONSTRUCTION
    │
@@ -322,21 +332,35 @@ User Input
 
 ```
 QUERY_ROUTER_PROMPT ──► (classifies input)
-                           │
-                           ▼ (if RAG_RETRIEVAL)
-CITATION_GENERATION_PROMPT ──► (generates answer with citations)
-                                    │
-                                    ▼
-FAITHFULNESS_CHECK_PROMPT ──► (evaluates claims against context)
-                                    │
-                            ┌───────┴───────┐
-                            ▼               ▼
-                          PASS            FAIL
-                            │               │
-                            │     SELF_CORRECTION_REWRITE_PROMPT
-                            │       (rewrite, then re-check)
-                            ▼               │
-                      Return answer   ──────┘ (up to max_attempts)
+                            │
+                            ▼ (if RAG_RETRIEVAL)
+╔══════════════════════════════════════════════╗
+║       THREE-STAGE HALLUCINATION DEFENSE      ║
+╠══════════════════════════════════════════════╣
+║ STAGE 1 — PREVENTION                         ║
+║ CITATION_GENERATION_PROMPT ──► (generates    ║
+║   answer with [Doc-X, p. Y] citations,       ║
+║   grounded strictly in context)              ║
+╠══════════════════════════════════════════════╣
+║ STAGE 2 — DETECTION                          ║
+║ FAITHFULNESS_CHECK_PROMPT ──► (evaluates     ║
+║   atomic claims against context, returns     ║
+║   JSON with per-claim supported flags)       ║
+╠══════════════════════════════════════════════╣
+║                     │                         ║
+║             ┌───────┴───────┐                ║
+║             ▼               ▼                ║
+║           PASS            FAIL               ║
+║             │               │                ║
+║             │    STAGE 3 — CORRECTION        ║
+║             │    SELF_CORRECTION_REWRITE_    ║
+║             │    PROMPT (rewrite with        ║
+║             │    specific contradictions,    ║
+║             │    then re-check from Stage 2) ║
+║             ▼               │                ║
+║       Return answer   ──────┘ (up to         ║
+║                           max_attempts)      ║
+╚══════════════════════════════════════════════╝
 ```
 
 ---

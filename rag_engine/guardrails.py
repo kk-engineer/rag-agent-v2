@@ -166,19 +166,31 @@ class GuardrailsManager:
 
         prompt = FAITHFULNESS_CHECK_PROMPT.format(context=formatted_context, answer=answer)
         messages = [{"role": "user", "content": prompt}]
-        logger.debug(f"  [Faithfulness check] PROMPT:\n{prompt}")
+        logger.debug(f"\033[1;33m[FAITHFULNESS CHECK]\033[0m Input: answer='{answer[:200]}...' | context='{formatted_context[:200]}...'")
 
         try:
 
+            faith_start = time.time()
             response = await self.llm_client.acompletion(
                 messages=messages,
                 model=model,
                 temperature=0.0,
                 metrics_collector=metrics_collector,
-                metrics_purpose="Faithfulness check"
+                metrics_purpose="FAITHFULNESS CHECK"
             )
             eval_text = response.choices[0].message.content
-            logger.debug(f"  [Faithfulness check] RESPONSE:\n{eval_text}")
+            faith_elapsed = time.time() - faith_start
+            usage = getattr(response, "usage", None)
+            pt = usage.prompt_tokens if usage else 0
+            ct = usage.completion_tokens if usage else 0
+            tt = usage.total_tokens if usage else 0
+            logger.debug(f"\033[1;33m[FAITHFULNESS CHECK]\033[0m Output: {eval_text}")
+            logger.info(
+                f"\033[1;33m[FAITHFULNESS CHECK]\033[0m "
+                f"\033[1;33m{model}\033[0m "
+                f"\033[1;32m[Tokens: {tt} (In={pt}, Out={ct})]\033[0m "
+                f"time: {faith_elapsed:.3f}s"
+            )
             return extract_json(eval_text)
         except Exception as e:
 
@@ -194,7 +206,8 @@ class GuardrailsManager:
         model: str = "local-llm",
         max_attempts: Optional[int] = None,
         on_thought: Optional[Any] = None,
-        chat_history: str = ""
+        chat_history: str = "",
+        metrics_collector: Optional[Any] = None,
     ) -> Dict[str, Any]:
 
         if max_attempts is None:
@@ -204,13 +217,14 @@ class GuardrailsManager:
         gen_temp = self.config["generation"].get("temperature", 0.0)
         gen_tokens = self.config["generation"].get("max_tokens", 512)
 
-        llm_metrics = LLMMetricsCollector()
+        llm_metrics = metrics_collector or LLMMetricsCollector()
 
         total_gen_start = time.time()
         logger.info(
-            f"Generating faithful answer — "
-            f"model={model}, gen_tokens={gen_tokens}, max_attempts={max_attempts}, "
-            f"contexts={len(contexts)}, query='{query[:80]}{'...' if len(query) > 80 else ''}'"
+            f"\033[1;33m[GUARDRAILS]\033[0m Starting | "
+            f"model=\033[1;33m{model}\033[0m | "
+            f"max_attempts={max_attempts} | contexts={len(contexts)} | "
+            f"query='{query[:80]}{'...' if len(query) > 80 else ''}'"
         )
 
         if on_thought:
@@ -221,7 +235,7 @@ class GuardrailsManager:
 
             # Simple fallback generation if no context retrieved
             messages = [{"role": "user", "content": query}]
-            logger.debug(f"  [No-context fallback] PROMPT:\n{query}")
+            logger.debug(f"\033[1;33m[NO-CONTEXT FALLBACK]\033[0m Input: query='{query}'")
             fallback_start = time.time()
             response = await self.llm_client.acompletion(
                 messages=messages,
@@ -229,7 +243,7 @@ class GuardrailsManager:
                 temperature=gen_temp,
                 max_tokens=gen_tokens,
                 metrics_collector=llm_metrics,
-                metrics_purpose="No-context fallback"
+                metrics_purpose="NO-CONTEXT FALLBACK"
             )
             fallback_duration = time.time() - fallback_start
             answer = response.choices[0].message.content
@@ -237,14 +251,17 @@ class GuardrailsManager:
             pt = usage.prompt_tokens if usage else 0
             ct = usage.completion_tokens if usage else 0
             tt = usage.total_tokens if usage else 0
+            logger.debug(f"\033[1;33m[NO-CONTEXT FALLBACK]\033[0m Output: {answer[:200]}...")
             logger.info(
-                f"  [Generation Step 1] Fallback (no context) — "
-                f"tokens: {pt}+{ct}={tt}, time: {fallback_duration:.3f}s"
+                f"\033[1;33m[NO-CONTEXT FALLBACK]\033[0m "
+                f"\033[1;33m{model}\033[0m "
+                f"\033[1;32m[Tokens: {tt} (In={pt}, Out={ct})]\033[0m "
+                f"time: {fallback_duration:.3f}s"
             )
-            logger.debug(f"  [No-context fallback] RESPONSE:\n{answer}")
+            logger.info(f"\n{llm_metrics.format_pretty_block()}")
             if on_thought:
 
-                on_thought(f"⏱️ Fallback answer formulation completed. Time taken: {fallback_duration:.3f}s")
+                on_thought(f"⏱️ No-context fallback completed. Time: {fallback_duration:.3f}s")
             return {
                 "answer": response.choices[0].message.content,
                 "faithful": True,
@@ -258,12 +275,11 @@ class GuardrailsManager:
         # 1. Format the context for prompt input via sequential citation mapping
         from rag_engine.core import RAGCoreEngine
         formatted_context, citation_map = RAGCoreEngine.prepare_context_and_citations(contexts)
-        logger.info(f"  Context prepared — {len(citation_map)} chunks, {len(formatted_context)} chars")
 
-        # 2. Initial answer generation
+        # 2. CITATION GENERATION
         prompt = CITATION_GENERATION_PROMPT.format(chat_history=chat_history, context=formatted_context, query=query)
         messages = [{"role": "user", "content": prompt}]
-        logger.debug(f"  [Initial generation] PROMPT:\n{prompt}")
+        logger.debug(f"\033[1;33m[CITATION GENERATION]\033[0m Input: query='{query}' | chat_history='{chat_history[:100]}...' | context='{formatted_context[:200]}...'")
         
         initial_start = time.time()
         response = await self.llm_client.acompletion(
@@ -272,7 +288,7 @@ class GuardrailsManager:
             temperature=gen_temp,
             max_tokens=gen_tokens,
             metrics_collector=llm_metrics,
-            metrics_purpose="Initial generation"
+            metrics_purpose="CITATION GENERATION"
         )
         answer = response.choices[0].message.content
         initial_duration = time.time() - initial_start
@@ -280,11 +296,16 @@ class GuardrailsManager:
         pt = usage.prompt_tokens if usage else 0
         ct = usage.completion_tokens if usage else 0
         tt = usage.total_tokens if usage else 0
-        logger.info(f"  [Generation Step 1] Initial answer — tokens: {pt}+{ct}={tt}, time: {initial_duration:.3f}s")
-        logger.debug(f"  [Initial generation] RESPONSE:\n{answer}")
+        logger.debug(f"\033[1;33m[CITATION GENERATION]\033[0m Output: {answer[:300]}...")
+        logger.info(
+            f"\033[1;33m[CITATION GENERATION]\033[0m "
+            f"\033[1;33m{model}\033[0m "
+            f"\033[1;32m[Tokens: {tt} (In={pt}, Out={ct})]\033[0m "
+            f"time: {initial_duration:.3f}s"
+        )
         if on_thought:
 
-            on_thought(f"⏱️ Initial answer formulation completed. Time taken: {initial_duration:.3f}s")
+            on_thought(f"⏱️ [CITATION GENERATION] completed. Time: {initial_duration:.3f}s")
 
         # 3. Iterative Validation and Rewrite Correction Loop
         for attempt in range(max_attempts):
@@ -297,42 +318,43 @@ class GuardrailsManager:
             cit_start = time.time()
             citations_ok, invalid_citations = self.validate_citations(answer, contexts)
             cit_duration = time.time() - cit_start
+            logger.debug(f"\033[1;33m[CITATION VALIDATION]\033[0m Input: answer='{answer[:200]}...' | Output: valid={citations_ok}, invalid={invalid_citations}")
             logger.info(
-                f"  [Generation Step 2.1 (Attempt {attempt + 1})] Citation check — "
-                f"valid={citations_ok}, invalid_count={len(invalid_citations)}, "
+                f"\033[1;33m[CITATION VALIDATION]\033[0m "
+                f"valid={citations_ok} | invalid_count={len(invalid_citations)} | "
                 f"time: {cit_duration:.3f}s"
             )
             if on_thought:
 
-                on_thought(f"⏱️ Citation check (Attempt {attempt + 1}) completed. Time taken: {cit_duration:.3f}s")
+                on_thought(f"⏱️ [CITATION VALIDATION] (Attempt {attempt + 1}) completed. Time: {cit_duration:.3f}s")
 
             # Check faithfulness
-            faith_start = time.time()
             eval_data = await self.check_faithfulness(answer, contexts, model=model, metrics_collector=llm_metrics, formatted_context=formatted_context)
             is_faithful = eval_data.get("faithful", True)
-            faith_duration = time.time() - faith_start
+            faith_duration = time.time() - cit_start
             logger.info(
-                f"  [Generation Step 2.2 (Attempt {attempt + 1})] Faithfulness check — "
-                f"faithful={is_faithful}, claims_evaluated={len(eval_data.get('claims', []))}, "
+                f"\033[1;33m[FAITHFULNESS CHECK RESULT]\033[0m "
+                f"faithful={is_faithful} | claims={len(eval_data.get('claims', []))} | "
                 f"time: {faith_duration:.3f}s"
             )
             if on_thought:
 
-                on_thought(f"⏱️ Faithfulness check (Attempt {attempt + 1}) completed. Time taken: {faith_duration:.3f}s")
+                on_thought(f"⏱️ [FAITHFULNESS CHECK] (Attempt {attempt + 1}) completed. Time: {faith_duration:.3f}s")
 
             if is_faithful and citations_ok:
 
                 if on_thought:
 
-                    on_thought(f"✅ Success! Generated answer passed all alignment checks. Total verification time: {(time.time() - total_gen_start):.3f}s")
+                    on_thought(f"✅ Answer passed all checks. Time: {(time.time() - total_gen_start):.3f}s")
 
                 total_gen_duration = time.time() - total_gen_start
                 logger.info(
-                    f"Successfully generated faithful answer — "
-                    f"attempts={attempt + 1}, total_time={total_gen_duration:.3f}s, "
-                    f"citation_map_refs={len(citation_map)}, "
+                    f"\033[1;33m[GUARDRAILS]\033[0m Passed after {attempt + 1} attempt(s) | "
+                    f"total_time={total_gen_duration:.3f}s | "
+                    f"citations={len(citation_map)} | "
                     f"answer_len={len(answer)} chars"
                 )
+                logger.info(f"\n{llm_metrics.format_pretty_block()}")
                 return {
                     "answer": answer,
                     "faithful": True,
@@ -364,13 +386,13 @@ class GuardrailsManager:
                     )
 
             logger.warning(
-                f"Validation failed on attempt {attempt + 1} for query: '{query}'. "
-                f"Contradictions: {contradictions}. Rewriting..."
+                f"\033[1;33m[GUARDRAILS]\033[0m Validation failed attempt {attempt + 1} | "
+                f"contradictions={len(contradictions)} | rewriting..."
             )
 
             if on_thought:
 
-                on_thought(f"⚠️ Self-correction: rewriting response to fix {len(contradictions)} identified contradictions/citations...")
+                on_thought(f"⚠️ Self-correction: rewriting response to fix {len(contradictions)} contradictions/citations...")
 
             # 4. Generate rewrite with corrections
             contradiction_text = "\n".join(f"- {c}" for c in contradictions)
@@ -382,7 +404,7 @@ class GuardrailsManager:
             )
 
             messages = [{"role": "user", "content": rewrite_prompt}]
-            logger.debug(f"  [Rewrite attempt {attempt + 1}] PROMPT:\n{rewrite_prompt}")
+            logger.debug(f"\033[1;33m[SELF CORRECTION REWRITE]\033[0m Input: contradictions={contradiction_text} | previous_answer='{answer[:200]}...'")
             rewrite_start = time.time()
             rewrite_res = await self.llm_client.acompletion(
                 messages=messages,
@@ -390,7 +412,7 @@ class GuardrailsManager:
                 temperature=gen_temp,
                 max_tokens=gen_tokens,
                 metrics_collector=llm_metrics,
-                metrics_purpose=f"Rewrite (attempt {attempt + 1})"
+                metrics_purpose="SELF CORRECTION REWRITE"
             )
             answer = rewrite_res.choices[0].message.content
             rewrite_duration = time.time() - rewrite_start
@@ -398,26 +420,29 @@ class GuardrailsManager:
             pt = usage.prompt_tokens if usage else 0
             ct = usage.completion_tokens if usage else 0
             tt = usage.total_tokens if usage else 0
+            logger.debug(f"\033[1;33m[SELF CORRECTION REWRITE]\033[0m Output: {answer[:300]}...")
             logger.info(
-                f"  [Generation Step 2.3 (Attempt {attempt + 1})] Self-correction rewrite — "
-                f"tokens: {pt}+{ct}={tt}, contradictions_fixed={len(contradictions)}, "
+                f"\033[1;33m[SELF CORRECTION REWRITE]\033[0m "
+                f"\033[1;33m{model}\033[0m "
+                f"\033[1;32m[Tokens: {tt} (In={pt}, Out={ct})]\033[0m "
+                f"contradictions_fixed={len(contradictions)} | "
                 f"time: {rewrite_duration:.3f}s"
             )
-            logger.debug(f"  [Rewrite attempt {attempt + 1}] RESPONSE:\n{answer}")
             if on_thought:
 
-                on_thought(f"⏱️ Rewrite generation (Attempt {attempt + 1}) completed. Time taken: {rewrite_duration:.3f}s")
+                on_thought(f"⏱️ [SELF CORRECTION REWRITE] (Attempt {attempt + 1}) completed. Time: {rewrite_duration:.3f}s")
 
         # If we exhausted attempts without passing checks, return latest state but flagged
         total_gen_duration = time.time() - total_gen_start
         logger.warning(
-            f"Exhausted self-correction attempts ({max_attempts}). "
-            f"Returning best-effort answer. "
-            f"total_time={total_gen_duration:.3f}s, answer_len={len(answer)} chars"
+            f"\033[1;33m[GUARDRAILS]\033[0m Exhausted {max_attempts} attempt(s) | "
+            f"returning best-effort | total_time={total_gen_duration:.3f}s | "
+            f"answer_len={len(answer)} chars"
         )
+        logger.info(f"\n{llm_metrics.format_pretty_block()}")
         if on_thought:
 
-            on_thought(f"⚠️ Verification failed after {max_attempts} attempts. Total verification time: {total_gen_duration:.3f}s")
+            on_thought(f"⚠️ Verification failed after {max_attempts} attempts. Total time: {total_gen_duration:.3f}s")
         return {
             "answer": answer,
             "faithful": False,

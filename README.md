@@ -17,6 +17,37 @@ Engine: Frankl argues that meaning is not abstract but unique to each individual
 
 ---
 
+## Hallucination Guard: Three-Stage Defense System
+
+The primary prompt guarding your RAG agent from hallucinating is the **`FAITHFULNESS_CHECK_PROMPT`**. It serves as the explicit detection guardrail. The prompt instructions even explicitly use the term: *"If any claim is not supported, set 'faithful' to false and describe the contradiction/hallucination."*
+
+However, in a production RAG pipeline like this, guarding against hallucinations is actually a **three-stage system** where three of your prompts work together:
+
+### 1. Prevention: `CITATION_GENERATION_PROMPT`
+
+This is your first line of defense. It sets strict boundaries before the LLM even writes the answer by commanding it to use **ONLY** the provided context and demanding inline citations (`[1]`, `[2]`).
+
+### 2. Detection: `FAITHFULNESS_CHECK_PROMPT`
+
+This acts as the automated judge (an evaluation step). It breaks down the generated answer into isolated atomic claims and checks them against the source context to find any fabrications that slipped through the prevention stage.
+
+### 3. Correction: `SELF_CORRECTION_REWRITE_PROMPT`
+
+If the detection prompt flags a hallucination, this prompt acts as the cleaner. It takes the specific contradictions identified by the faithfulness check and forces the LLM to rewrite the answer, stripping out the ungrounded text.
+
+```
+Retrieval
+   ↓
+Answer Generation (CITATION_GENERATION_PROMPT)
+   ↓
+Faithfulness Validation (FAITHFULNESS_CHECK_PROMPT)
+   ↓
+If hallucinated:
+    Self Correction (SELF_CORRECTION_REWRITE_PROMPT)
+```
+
+---
+
 ## Key Features
 
 | Feature | Description |
@@ -126,10 +157,15 @@ RAGCoreEngine.search()
     │
     ▼
 GuardrailsManager.generate_faithful_answer()
-    ├── Generate answer with [Doc-X, p. Y] citations
-    ├── Validate citations
-    ├── Check faithfulness (JSON-based)
-    └── Self-correct up to 3 attempts
+    │
+    ├── Stage 1 — Prevention: Generate answer with CITATION_GENERATION_PROMPT
+    │   ([Doc-X, p. Y] citations, grounded strictly in context)
+    │
+    ├── Stage 2 — Detection: Validate citations + Check faithfulness
+    │   via FAITHFULNESS_CHECK_PROMPT (per-claim JSON audit)
+    │
+    └── Stage 3 — Correction: Self-correct up to 3 attempts
+        via SELF_CORRECTION_REWRITE_PROMPT (rewrite if hallucinated)
     │
     ▼
 Output: cited answer + citation map + metrics

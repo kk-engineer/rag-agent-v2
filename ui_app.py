@@ -40,7 +40,7 @@ import streamlit as st
 import asyncio
 import time
 import logging
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ConversationMemory, QueryRouter
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ConversationMemory, QueryRouter, LLMMetricsCollector
 from rag_engine.prompts import DIRECT_LLM_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -412,19 +412,33 @@ if st.session_state.generating and st.session_state.pending_query:
     # Start measuring latency
     start_time = time.time()
 
+    # Create shared metrics collector for all LLM calls in this query
+    llm_metrics = LLMMetricsCollector()
+
     # Route the query
-    route_result = run_async(st.session_state.query_router.route_query(user_query))
+    route_result = run_async(st.session_state.query_router.route_query(
+        user_query, metrics_collector=llm_metrics, model=model_name
+    ))
 
     if route_result["route"] == "DIRECT_LLM":
-
         messages = [
             {"role": "system", "content": DIRECT_LLM_SYSTEM_PROMPT},
             {"role": "user", "content": user_query},
         ]
+        direct_start = time.time()
         response = run_async(
-            st.session_state.llm_client.acompletion(messages, temperature=0.7)
+            st.session_state.llm_client.acompletion(
+                messages, temperature=0.7,
+                metrics_collector=llm_metrics,
+                metrics_purpose="Direct LLM"
+            )
         )
         answer = response.choices[0].message.content
+        direct_elapsed = time.time() - direct_start
+        usage = getattr(response, "usage", None)
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        tt = usage.total_tokens if usage else 0
 
         latency_total = (time.time() - start_time) * 1000
         run_async(st.session_state.query_logger.log_query(
@@ -434,7 +448,12 @@ if st.session_state.generating and st.session_state.pending_query:
             latency_ms=latency_total,
             metadata={"routing": "direct_llm"}
         ))
-        logger.info(f"[RAG Metrics] Route: DIRECT_LLM, Latency: {latency_total:.1f}ms")
+        logger.info(
+            f"\033[1;34m[Direct LLM]\033[0m "
+            f"\033[1;33m{model_name}\033[0m "
+            f"\033[1;32m[Tokens: {tt} (In={pt}, Out={ct})]\033[0m "
+            f"time: {direct_elapsed:.3f}s"
+        )
 
         with st.chat_message("assistant", avatar="✨"):
             async def direct_stream():
@@ -444,7 +463,11 @@ if st.session_state.generating and st.session_state.pending_query:
             final_answer = render_streaming_response(direct_stream())
             st.caption("💬 Direct LLM response (no document search)")
 
-        st.session_state.chat_history.append({"role": "assistant", "content": final_answer})
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": final_answer,
+            "llm_metrics": llm_metrics.to_dict()
+        })
         st.session_state.memory.add_turn(user_query, final_answer)
         st.session_state.pending_query = None
         st.session_state.generating = False
@@ -475,7 +498,8 @@ if st.session_state.generating and st.session_state.pending_query:
         result = run_async(st.session_state.guardrails.generate_faithful_answer(
             user_query, retrieved_contexts, model=model_name,
             on_thought=show_thought,
-            chat_history=st.session_state.memory.format_history()
+            chat_history=st.session_state.memory.format_history(),
+            metrics_collector=llm_metrics
         ))
         
         status_box.update(label="Verification finished!", state="complete", expanded=False)
@@ -492,20 +516,10 @@ if st.session_state.generating and st.session_state.pending_query:
         top_score = max(scores) if scores else 0.0
         avg_score = sum(scores) / num_docs if num_docs > 0 else 0.0
         logger.info(
-            f"[RAG Metrics] Retrieval: nodes={num_docs}, "
-            f"retrieve={latency_retrieve:.1f}ms, "
-            f"total={latency_total:.1f}ms, max_score={top_score:.4f}, avg_score={avg_score:.4f}"
+            f"\033[1;37m[Retrieval]\033[0m nodes={num_docs} | "
+            f"retrieve={latency_retrieve:.1f}ms | "
+            f"total={latency_total:.1f}ms | max_score={top_score:.4f} | avg_score={avg_score:.4f}"
         )
-        llm_metrics = result.get("llm_metrics")
-        if llm_metrics:
-            logger.info(
-                f"[RAG Metrics] LLM: calls={llm_metrics['total_calls']}, "
-                f"prompt_tks={llm_metrics['total_prompt_tokens']}, "
-                f"completion_tks={llm_metrics['total_completion_tokens']}, "
-                f"total_tks={llm_metrics['total_tokens']}, "
-                f"time={llm_metrics['total_llm_time_ms']/1000:.3f}s, "
-                f"breakdown: {llm_metrics['per_call_breakdown_str']}"
-            )
 
         run_async(st.session_state.query_logger.log_query(
             query=user_query,
@@ -531,7 +545,7 @@ if st.session_state.generating and st.session_state.pending_query:
             "retrieved_contexts": retrieved_contexts,
             "citation_map": result.get("citation_map", {}),
             "latency_retrieve": latency_retrieve,
-            "llm_metrics": result.get("llm_metrics")
+            "llm_metrics": llm_metrics.to_dict()
         })
 
     st.session_state.memory.add_turn(user_query, final_answer)

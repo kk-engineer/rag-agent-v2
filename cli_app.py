@@ -4,7 +4,7 @@ import asyncio
 import click
 import logging
 import sys
-from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory, configure_logging, QueryRouter
+from rag_engine import LiteLLMClient, RAGCoreEngine, GuardrailsManager, QueryLogger, ColoredFormatter, ConversationMemory, configure_logging, QueryRouter, LLMMetricsCollector
 from rag_engine.prompts import DIRECT_LLM_SYSTEM_PROMPT
 from rag_engine.cli import REPLManager
 
@@ -43,9 +43,10 @@ selected_model = "local-llm"
 async def query_callback(query: str):
 
     start_time = time.time()
+    llm_metrics = LLMMetricsCollector()
 
     # 0. Route the query
-    route_result = await query_router.route_query(query)
+    route_result = await query_router.route_query(query, metrics_collector=llm_metrics, model=selected_model)
 
     if route_result["route"] == "DIRECT_LLM":
 
@@ -53,8 +54,18 @@ async def query_callback(query: str):
             {"role": "system", "content": DIRECT_LLM_SYSTEM_PROMPT},
             {"role": "user", "content": query},
         ]
-        response = await llm_client.acompletion(messages, temperature=0.7)
+        direct_start = time.time()
+        response = await llm_client.acompletion(
+            messages, temperature=0.7,
+            metrics_collector=llm_metrics,
+            metrics_purpose="Direct LLM"
+        )
         answer = response.choices[0].message.content
+        direct_elapsed = time.time() - direct_start
+        usage = getattr(response, "usage", None)
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        tt = usage.total_tokens if usage else 0
         memory.add_turn(query, answer)
 
         latency = (time.time() - start_time) * 1000
@@ -66,15 +77,25 @@ async def query_callback(query: str):
             metadata={"model": selected_model, "routing": "direct_llm"}
         )
 
+        logger.info(
+            f"\033[1;34m[Direct LLM]\033[0m "
+            f"\033[1;33m{selected_model}\033[0m "
+            f"\033[1;32m[Tokens: {tt} (In={pt}, Out={ct})]\033[0m "
+            f"time: {direct_elapsed:.3f}s"
+        )
+
         chunk_size = 5
         for i in range(0, len(answer), chunk_size):
             yield answer[i:i + chunk_size]
             await asyncio.sleep(0.01)
 
+        metrics_output = llm_metrics.format_pretty_block()
         yield (
             f"\n\n\033[33m💬 Direct LLM response (no document search)"
             f" — Latency: {latency:.1f} ms\033[0m"
         )
+        if metrics_output:
+            yield f"\n\n{metrics_output}\n"
         return
 
     # 1. Search core engine
@@ -86,7 +107,8 @@ async def query_callback(query: str):
     start_gen = time.time()
     result = await guardrails.generate_faithful_answer(
         query, contexts, model=selected_model,
-        chat_history=memory.format_history()
+        chat_history=memory.format_history(),
+        metrics_collector=llm_metrics
     )
     latency_gen = (time.time() - start_gen) * 1000
     answer = result["answer"]
@@ -146,35 +168,16 @@ async def query_callback(query: str):
         f"\033[94m------------------------------------\033[0m\n"
     )
 
-    llm_metrics = result.get("llm_metrics")
-    if llm_metrics:
-        metrics_str += (
-            f"\n"
-            f"\033[95m--- LLM Metrics ---\033[0m\n"
-            f"• \033[1mTotal LLM Calls:\033[0m {llm_metrics['total_calls']}\n"
-            f"• \033[1mTotal Prompt Tokens:\033[0m {llm_metrics['total_prompt_tokens']}\n"
-            f"• \033[1mTotal Completion Tokens:\033[0m {llm_metrics['total_completion_tokens']}\n"
-            f"• \033[1mTotal Tokens:\033[0m {llm_metrics['total_tokens']}\n"
-            f"• \033[1mTotal LLM Time:\033[0m {llm_metrics['total_llm_time_ms']/1000:.3f}s\n"
-            f"• \033[1mPer-call breakdown:\033[0m {llm_metrics['per_call_breakdown_str']}\n"
-            f"\033[95m------------------------------------\033[0m\n"
-        )
+    metrics_block = llm_metrics.format_pretty_block()
+    if metrics_block:
+        metrics_str += f"\n{metrics_block}\n"
 
     # Log structured metrics
     logger.info(
-        f"[RAG Metrics] Retrieval: nodes={num_docs}, "
-        f"retrieve={latency_retrieve:.1f}ms, generate={latency_gen:.1f}ms, "
-        f"total={latency:.1f}ms, max_score={top_score:.4f}, avg_score={avg_score:.4f}"
+        f"\033[1;37m[Retrieval]\033[0m nodes={num_docs} | "
+        f"retrieve={latency_retrieve:.1f}ms | generate={latency_gen:.1f}ms | "
+        f"total={latency:.1f}ms | max_score={top_score:.4f} | avg_score={avg_score:.4f}"
     )
-    if llm_metrics:
-        logger.info(
-            f"[RAG Metrics] LLM: calls={llm_metrics['total_calls']}, "
-            f"prompt_tks={llm_metrics['total_prompt_tokens']}, "
-            f"completion_tks={llm_metrics['total_completion_tokens']}, "
-            f"total_tks={llm_metrics['total_tokens']}, "
-            f"time={llm_metrics['total_llm_time_ms']/1000:.3f}s, "
-            f"breakdown: {llm_metrics['per_call_breakdown_str']}"
-        )
 
     yield metrics_str
 

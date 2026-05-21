@@ -309,7 +309,7 @@ class LiteLLMClient:
                 pt = usage.prompt_tokens if usage else 0
                 ct = usage.completion_tokens if usage else 0
                 tt = usage.total_tokens if usage else 0
-                metrics_collector.add_call(metrics_purpose, elapsed * 1000, pt, ct, tt)
+                metrics_collector.add_call(metrics_purpose, elapsed * 1000, pt, ct, tt, model=_display_model)
             return response
         except Exception as e:
 
@@ -352,7 +352,8 @@ class LiteLLMClient:
                 "huggingface": "HF_TOKEN",
                 "deepseek": "DEEPSEEK_API_KEY",
                 "openai": "OPENAI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY"
+                "anthropic": "ANTHROPIC_API_KEY",
+                "groq": "GROQ_API_KEY",
             }
             
             if not api_key:
@@ -422,6 +423,7 @@ class LiteLLMClient:
             try:
 
                 cf_start = time.time()
+                _cf_display = model.split("/", 1)[-1] if "/" in model else model
                 logger.debug(f"--- LLM PROMPT [{provider} / {model}] ({metrics_purpose}) ---\n{json.dumps(litellm_kwargs.get('messages', messages), indent=2)}\n----------------------------")
 
                 response = await asyncio.wait_for(
@@ -445,7 +447,7 @@ class LiteLLMClient:
                     pt = cf_usage.prompt_tokens if cf_usage else 0
                     ct = cf_usage.completion_tokens if cf_usage else 0
                     tt = cf_usage.total_tokens if cf_usage else 0
-                    metrics_collector.add_call(metrics_purpose, cf_elapsed * 1000, pt, ct, tt)
+                    metrics_collector.add_call(metrics_purpose, cf_elapsed * 1000, pt, ct, tt, model=_cf_display)
                 logger.info(f"Cloud completion successful using provider '{provider}'.")
                 return response
             except asyncio.TimeoutError:
@@ -490,7 +492,8 @@ class LiteLLMClient:
                 "huggingface": "HF_TOKEN",
                 "deepseek": "DEEPSEEK_API_KEY",
                 "openai": "OPENAI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY"
+                "anthropic": "ANTHROPIC_API_KEY",
+                "groq": "GROQ_API_KEY",
             }
             
             if not api_key:
